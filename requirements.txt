@@ -1,0 +1,2 @@
+databricks-sdk>=0.27,<1.0
+python-dotenv>=1.0

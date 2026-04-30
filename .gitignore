@@ -1,0 +1,23 @@
+# Credentials — never commit
+.env
+.databrickscfg
+
+# Claude Code / AI context
+.claude/
+memory/
+MEMORY.md
+*.claude.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Editors
+.idea/
+.vscode/
+*.log
