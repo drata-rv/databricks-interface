@@ -91,7 +91,7 @@ def run_sql(
       - rows:    list of row lists (strings; Databricks returns everything as str)
       - state:   final StatementState value
     """
-    from databricks.sdk.service.sql import ExecuteStatementRequest, Disposition
+    from databricks.sdk.service.sql import Disposition
 
     request_kwargs: Dict[str, Any] = dict(
         statement=statement,

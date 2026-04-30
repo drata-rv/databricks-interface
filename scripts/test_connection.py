@@ -92,7 +92,15 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     # 4. Schemas in target catalog                                         #
     # ------------------------------------------------------------------ #
-    target_catalog = os.getenv("DATABRICKS_CATALOG", "hive_metastore")
+    env_catalog = os.getenv("DATABRICKS_CATALOG", "")
+    if env_catalog:
+        target_catalog = env_catalog
+    else:
+        try:
+            available = queries.list_catalogs(client)
+            target_catalog = "main" if "main" in available else (available[0] if available else "main")
+        except Exception:
+            target_catalog = "main"
     section(f"4. Schemas in '{target_catalog}'")
     try:
         schemas = queries.list_schemas(client, target_catalog)
