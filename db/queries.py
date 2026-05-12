@@ -108,16 +108,21 @@ def run_sql(
 
     # If not yet complete, poll until done or timeout exceeded.
     deadline = time.monotonic() + wait_timeout_seconds
+    elapsed = 0
     while response.status and response.status.state in (
         StatementState.PENDING,
         StatementState.RUNNING,
     ):
         if time.monotonic() > deadline:
             break
+        print(f"  Waiting for query... ({elapsed}s)", end="\r", flush=True)
         time.sleep(1)
+        elapsed += 1
         response = client.statement_execution.get_statement(
             statement_id=response.statement_id
         )
+    if elapsed:
+        print()  # newline after the carriage-return progress line
 
     state = response.status.state if response.status else None
 
