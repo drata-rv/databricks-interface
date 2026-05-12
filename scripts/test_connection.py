@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
 """
-Local connectivity test script.
+Connectivity and data extraction test.
 
-Run:
+Usage:
     python scripts/test_connection.py
+    python scripts/test_connection.py --table catalog.schema.table_name
+    python scripts/test_connection.py --table catalog.schema.table_name --limit 500
+    python scripts/test_connection.py --table catalog.schema.table_name --output path/to/out.json
 
-Reads credentials from .env (or ~/.databrickscfg / env vars).
-Set DATABRICKS_WAREHOUSE_ID, DATABRICKS_CATALOG, DATABRICKS_SCHEMA
-in .env to run the SQL probes against your target database.
+Phases:
+    0-2  Auth and connectivity (always runs)
+    3-5  Data source discovery (always runs)
+    6    SQL smoke test (requires DATABRICKS_WAREHOUSE_ID)
+    7    Table pull and JSON export (requires --table or DATABRICKS_TABLE, and DATABRICKS_WAREHOUSE_ID)
+
+Table path resolution order:
+    1. --table argument
+    2. DATABRICKS_TABLE environment variable
 """
 
+import argparse
+import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 # Allow running from repo root or from scripts/
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,6 +33,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from db.auth import get_client, get_config
 from db import queries
 
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
 
 def section(title: str) -> None:
     print(f"\n{'='*60}")
@@ -39,9 +55,75 @@ def fail(label: str, err: Exception) -> None:
     print(f"  [FAIL] {label}: {err}")
 
 
+def skip(reason: str) -> None:
+    print(f"  [SKIP] {reason}")
+
+
+# ---------------------------------------------------------------------------
+# JSON serialisation
+# ---------------------------------------------------------------------------
+
+def rows_to_records(
+    columns: List[str],
+    rows: List[List[Any]],
+) -> List[Dict[str, Any]]:
+    """Zip column names and row values into a list of dicts."""
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def write_json(records: List[Dict[str, Any]], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2, default=str)
+
+
+def default_output_path(table: str) -> Path:
+    table_slug = table.replace(".", "_")
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return Path("output") / f"{table_slug}_{timestamp}.json"
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Test Databricks connectivity and extract table data as JSON."
+    )
+    parser.add_argument(
+        "--table",
+        metavar="CATALOG.SCHEMA.TABLE",
+        default=os.getenv("DATABRICKS_TABLE", ""),
+        help="Fully qualified table path. Overrides DATABRICKS_TABLE env var.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=int(os.getenv("DATABRICKS_LIMIT", "1000")),
+        help="Max rows to pull (default: 1000).",
+    )
+    parser.add_argument(
+        "--output",
+        metavar="FILE",
+        default="",
+        help="Output file path. Defaults to output/<table>_<timestamp>.json.",
+    )
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> None:
+    args = parse_args()
+    table: str = args.table.strip()
+    limit: int = args.limit
+    output_path: Optional[Path] = Path(args.output) if args.output else None
+
     # ------------------------------------------------------------------ #
-    # 0. Show resolved auth config                                         #
+    # 0. Resolved auth                                                     #
     # ------------------------------------------------------------------ #
     section("0. Resolved authentication")
     try:
@@ -79,12 +161,13 @@ def main() -> None:
         fail("List warehouses", e)
 
     # ------------------------------------------------------------------ #
-    # 3. Unity Catalog — catalogs                                         #
+    # 3. Unity Catalog -- catalogs                                         #
     # ------------------------------------------------------------------ #
-    section("3. Unity Catalog — catalogs")
+    section("3. Unity Catalog -- catalogs")
+    available_catalogs: List[str] = []
     try:
-        catalogs = queries.list_catalogs(client)
-        for name in catalogs:
+        available_catalogs = queries.list_catalogs(client)
+        for name in available_catalogs:
             ok(name)
     except Exception as e:
         fail("List catalogs", e)
@@ -95,12 +178,11 @@ def main() -> None:
     env_catalog = os.getenv("DATABRICKS_CATALOG", "")
     if env_catalog:
         target_catalog = env_catalog
+    elif available_catalogs:
+        target_catalog = "main" if "main" in available_catalogs else available_catalogs[0]
     else:
-        try:
-            available = queries.list_catalogs(client)
-            target_catalog = "main" if "main" in available else (available[0] if available else "main")
-        except Exception:
-            target_catalog = "main"
+        target_catalog = "main"
+
     section(f"4. Schemas in '{target_catalog}'")
     try:
         schemas = queries.list_schemas(client, target_catalog)
@@ -117,7 +199,7 @@ def main() -> None:
     try:
         tables = queries.list_tables(client, target_catalog, target_schema)
         if tables:
-            for t in tables[:20]:  # cap output
+            for t in tables[:20]:
                 ok(t["name"], f"type={t['table_type']}")
             if len(tables) > 20:
                 print(f"  ... and {len(tables) - 20} more")
@@ -132,7 +214,7 @@ def main() -> None:
     warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
     section("6. SQL smoke test (SELECT 1)")
     if not warehouse_id:
-        print("  Skipped — set DATABRICKS_WAREHOUSE_ID in .env to enable")
+        skip("set DATABRICKS_WAREHOUSE_ID in .env to enable")
     else:
         try:
             result = queries.run_sql(
@@ -145,28 +227,29 @@ def main() -> None:
             fail("SQL smoke test", e)
 
     # ------------------------------------------------------------------ #
-    # 7. Sample table query (optional)                                     #
+    # 7. Table pull and JSON export                                        #
     # ------------------------------------------------------------------ #
-    section(f"7. Sample data from '{target_catalog}.{target_schema}'")
+    section("7. Table pull and JSON export")
+
     if not warehouse_id:
-        print("  Skipped — set DATABRICKS_WAREHOUSE_ID in .env to enable")
+        skip("set DATABRICKS_WAREHOUSE_ID in .env to enable")
+    elif not table:
+        skip("provide --table CATALOG.SCHEMA.TABLE or set DATABRICKS_TABLE in .env")
     else:
+        print(f"  Table   : {table}")
+        print(f"  Limit   : {limit}")
         try:
-            sample_sql = (
-                f"SELECT * FROM {target_catalog}.{target_schema} LIMIT 5"
-            )
             result = queries.run_sql(
                 client,
-                statement=sample_sql,
+                statement=f"SELECT * FROM {table} LIMIT {limit}",
                 warehouse_id=warehouse_id,
-                catalog=target_catalog,
-                schema=target_schema,
             )
-            print(f"  Columns : {result['columns']}")
-            for row in result["rows"]:
-                print(f"  Row     : {row}")
+            records = rows_to_records(result["columns"], result["rows"])
+            out = output_path or default_output_path(table)
+            write_json(records, out)
+            ok(f"Wrote {len(records)} records to {out}")
         except Exception as e:
-            fail("Sample data query", e)
+            fail("Table pull", e)
 
     print("\nDone.\n")
 

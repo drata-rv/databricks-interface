@@ -17,6 +17,9 @@ build/
 .venv/
 venv/
 
+# Extracted data -- never commit
+output/
+
 # Editors
 .idea/
 .vscode/
