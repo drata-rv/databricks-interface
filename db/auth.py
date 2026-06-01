@@ -36,13 +36,18 @@ _load_dotenv = load_env
 
 
 def get_client() -> WorkspaceClient:
-    """Return an authenticated WorkspaceClient.
-
-    Works identically in local dev (reads .env or ~/.databrickscfg) and
-    in deployed/CI contexts (env vars injected by the orchestrator).
-    """
+    """Return an authenticated WorkspaceClient using env/config credential chain."""
     _load_dotenv()
     return WorkspaceClient()
+
+
+def get_client_for(host: str, token: str) -> WorkspaceClient:
+    """Return an authenticated WorkspaceClient for a specific host and token.
+
+    Use this when targeting a workspace other than the default (e.g. a test
+    workspace with a different URL and token).
+    """
+    return WorkspaceClient(host=host, token=token)
 
 
 def get_config() -> Config:
