@@ -34,7 +34,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -146,9 +146,12 @@ def write_json(payload: List[Dict[str, Any]], output_path: Path) -> None:
         json.dump(payload, f, indent=2, default=str)
 
 
-def default_output_path() -> Path:
+def default_output_paths() -> Tuple[Path, Path]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return Path("output") / f"devices_{timestamp}.json"
+    return (
+        Path("output") / f"devices_{timestamp}_raw.json",
+        Path("output") / f"devices_{timestamp}_drata.json",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +223,16 @@ def parse_args() -> argparse.Namespace:
         help="Max rows to pull per table (default: 1000).",
     )
     parser.add_argument(
-        "--output",
+        "--output-raw",
         metavar="FILE",
         default="",
-        help="Output file path. Defaults to output/devices_<timestamp>.json.",
+        help="Path for the raw merged JSON. Defaults to output/devices_<timestamp>_raw.json.",
+    )
+    parser.add_argument(
+        "--output-drata",
+        metavar="FILE",
+        default="",
+        help="Path for the Drata-formatted JSON. Defaults to output/devices_<timestamp>_drata.json.",
     )
     parser.add_argument(
         "--debug",
@@ -259,14 +268,17 @@ def main() -> None:
 
     prod_client = get_client_for(host=args.host_prod, token=args.token_prod)
     test_client = get_client_for(host=args.host_test, token=args.token_test)
-    output_path = Path(args.output) if args.output else default_output_path()
+    default_raw, default_drata = default_output_paths()
+    raw_path = Path(args.output_raw) if args.output_raw else default_raw
+    drata_path = Path(args.output_drata) if args.output_drata else default_drata
 
     print(f"\nProd workspace   : {args.host_prod}")
     print(f"Test workspace   : {args.host_test}")
     print(f"Warehouse (prod) : {args.warehouse_prod}")
     print(f"Warehouse (test) : {args.warehouse_test}")
     print(f"Limit            : {args.limit} rows per table")
-    print(f"Output           : {output_path}")
+    print(f"Output (raw)     : {raw_path}")
+    print(f"Output (drata)   : {drata_path}")
 
     if args.debug:
         databrickscfg = Path.home() / ".databrickscfg"
@@ -294,11 +306,14 @@ def main() -> None:
     print(f"  {len(merged)} device records assembled.")
 
     print("Transforming to Drata MDM format ...")
-    payload = transform_all(merged)
-    print(f"  {len(payload)} records transformed.")
+    drata_payload = transform_all(merged)
+    print(f"  {len(drata_payload)} records transformed.")
 
-    write_json(payload, output_path)
-    print(f"\n[OK] Written to {output_path}\n")
+    write_json(merged, raw_path)
+    print(f"\n[OK] Raw merged JSON  : {raw_path}")
+
+    write_json(drata_payload, drata_path)
+    print(f"[OK] Drata MDM JSON   : {drata_path}\n")
 
 
 if __name__ == "__main__":
