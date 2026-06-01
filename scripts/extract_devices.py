@@ -17,10 +17,13 @@ Usage:
         --wu         catalog.schema.t_sccm_gs_windowsupdate \\
         --software   catalog.schema.t_sccm_gs_installed_software
 
-Table paths can also be set via environment variables:
+Table paths and warehouse IDs can also be set via environment variables:
     DATABRICKS_TABLE_DEVICES
     DATABRICKS_TABLE_WINDOWS_UPDATE
     DATABRICKS_TABLE_INSTALLED_SOFTWARE
+    DATABRICKS_WAREHOUSE_ID          -- used for the devices table (prod)
+    DATABRICKS_WAREHOUSE_ID_TEST     -- used for windows_update and installed_software (test)
+                                        Falls back to DATABRICKS_WAREHOUSE_ID if not set.
 
 All three tables are required. Script exits with a non-zero code if any pull fails.
 """
@@ -168,6 +171,18 @@ def parse_args() -> argparse.Namespace:
         help="Fully qualified path to t_sccm_gs_installed_software.",
     )
     parser.add_argument(
+        "--warehouse-prod",
+        metavar="WAREHOUSE_ID",
+        default=os.getenv("DATABRICKS_WAREHOUSE_ID", ""),
+        help="Warehouse ID for the prod devices table. Uses DATABRICKS_WAREHOUSE_ID.",
+    )
+    parser.add_argument(
+        "--warehouse-test",
+        metavar="WAREHOUSE_ID",
+        default=os.getenv("DATABRICKS_WAREHOUSE_ID_TEST", "") or os.getenv("DATABRICKS_WAREHOUSE_ID", ""),
+        help="Warehouse ID for the test catalog tables. Uses DATABRICKS_WAREHOUSE_ID_TEST, falls back to DATABRICKS_WAREHOUSE_ID.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=int(os.getenv("DATABRICKS_LIMIT", "1000")),
@@ -193,29 +208,27 @@ def main() -> None:
         ("--devices (or DATABRICKS_TABLE_DEVICES)", args.devices),
         ("--wu (or DATABRICKS_TABLE_WINDOWS_UPDATE)", args.wu),
         ("--software (or DATABRICKS_TABLE_INSTALLED_SOFTWARE)", args.software),
+        ("--warehouse-prod (or DATABRICKS_WAREHOUSE_ID)", args.warehouse_prod),
+        ("--warehouse-test (or DATABRICKS_WAREHOUSE_ID_TEST)", args.warehouse_test),
     ] if not val.strip()]
 
     if missing:
-        print("Error: the following required table paths are not set:")
+        print("Error: the following required values are not set:")
         for m in missing:
             print(f"  {m}")
-        sys.exit(1)
-
-    warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
-    if not warehouse_id:
-        print("Error: DATABRICKS_WAREHOUSE_ID is not set.")
         sys.exit(1)
 
     client = get_client()
     output_path = Path(args.output) if args.output else default_output_path()
 
-    print(f"\nWarehouse : {warehouse_id}")
-    print(f"Limit     : {args.limit} rows per table")
-    print(f"Output    : {output_path}\n")
+    print(f"\nWarehouse (prod) : {args.warehouse_prod}")
+    print(f"Warehouse (test) : {args.warehouse_test}")
+    print(f"Limit            : {args.limit} rows per table")
+    print(f"Output           : {output_path}\n")
 
-    devices = pull_table(client, args.devices, warehouse_id, args.limit, "devices")
-    wu = pull_table(client, args.wu, warehouse_id, args.limit, "windows_update")
-    software = pull_table(client, args.software, warehouse_id, args.limit, "installed_software")
+    devices = pull_table(client, args.devices, args.warehouse_prod, args.limit, "devices")
+    wu = pull_table(client, args.wu, args.warehouse_test, args.limit, "windows_update")
+    software = pull_table(client, args.software, args.warehouse_test, args.limit, "installed_software")
 
     print("\nMerging on resource_id ...")
     payload = merge(devices, wu, software)
