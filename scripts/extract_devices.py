@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from db.auth import get_client, load_env
+from db.auth import get_client, get_config, load_env
 from db import queries
 
 # Load .env before parse_args() so os.getenv() defaults are populated
@@ -200,6 +200,12 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Output file path. Defaults to output/devices_<timestamp>.json.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Print full resolved config and env var sources before running.",
+    )
     return parser.parse_args()
 
 
@@ -224,14 +230,33 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
+    # Resolve config before building the client so we can show what the SDK
+    # actually picked up, not just what the env vars say.
+    cfg = get_config()
     client = get_client()
     output_path = Path(args.output) if args.output else default_output_path()
 
-    print(f"\nWorkspace        : {os.getenv('DATABRICKS_HOST', '')}")
+    print(f"\nWorkspace        : {cfg.host}")
+    print(f"Auth type        : {cfg.auth_type}")
     print(f"Warehouse (prod) : {args.warehouse_prod}")
     print(f"Warehouse (test) : {args.warehouse_test}")
     print(f"Limit            : {args.limit} rows per table")
-    print(f"Output           : {output_path}\n")
+    print(f"Output           : {output_path}")
+
+    if args.debug:
+        print(f"\n-- DEBUG --")
+        print(f"DATABRICKS_HOST env         : {os.getenv('DATABRICKS_HOST', '(not set)')}")
+        print(f"DATABRICKS_TOKEN env        : {'(set)' if os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
+        print(f"DATABRICKS_WAREHOUSE_ID     : {os.getenv('DATABRICKS_WAREHOUSE_ID', '(not set)')}")
+        print(f"DATABRICKS_WAREHOUSE_ID_TEST: {os.getenv('DATABRICKS_WAREHOUSE_ID_TEST', '(not set)')}")
+        print(f"DATABRICKS_TABLE_DEVICES    : {os.getenv('DATABRICKS_TABLE_DEVICES', '(not set)')}")
+        print(f"DATABRICKS_TABLE_WINDOWS_UPDATE  : {os.getenv('DATABRICKS_TABLE_WINDOWS_UPDATE', '(not set)')}")
+        print(f"DATABRICKS_TABLE_INSTALLED_SOFTWARE: {os.getenv('DATABRICKS_TABLE_INSTALLED_SOFTWARE', '(not set)')}")
+        print(f"SDK resolved host           : {cfg.host}")
+        print(f"SDK resolved auth type      : {cfg.auth_type}")
+        print(f"-- END DEBUG --\n")
+    else:
+        print()
 
     devices = pull_table(client, args.devices, args.warehouse_prod, args.limit, "devices")
     wu = pull_table(client, args.wu, args.warehouse_test, args.limit, "windows_update")
