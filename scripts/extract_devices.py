@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from db.auth import get_client, get_config, load_env
+from db.auth import get_client, get_client_for, get_config, load_env
 from db import queries
 
 # Load .env before parse_args() so os.getenv() defaults are populated
@@ -185,8 +185,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warehouse-test",
         metavar="WAREHOUSE_ID",
-        default=os.getenv("DATABRICKS_WAREHOUSE_ID_TEST", "") or os.getenv("DATABRICKS_WAREHOUSE_ID", ""),
+        default=os.getenv("DATABRICKS_WAREHOUSE_ID_TEST", ""),
         help="Warehouse ID for the test catalog tables. Uses DATABRICKS_WAREHOUSE_ID_TEST.",
+    )
+    parser.add_argument(
+        "--host-prod",
+        metavar="URL",
+        default=os.getenv("DATABRICKS_HOST_PROD", ""),
+        help="Prod workspace URL. Uses DATABRICKS_HOST_PROD.",
+    )
+    parser.add_argument(
+        "--host-test",
+        metavar="URL",
+        default=os.getenv("DATABRICKS_HOST_TEST", ""),
+        help="Test workspace URL. Uses DATABRICKS_HOST_TEST.",
+    )
+    parser.add_argument(
+        "--token-prod",
+        metavar="TOKEN",
+        default=os.getenv("DATABRICKS_TOKEN_PROD", "") or os.getenv("DATABRICKS_TOKEN", ""),
+        help="Token for the prod workspace. Uses DATABRICKS_TOKEN_PROD, falls back to DATABRICKS_TOKEN.",
+    )
+    parser.add_argument(
+        "--token-test",
+        metavar="TOKEN",
+        default=os.getenv("DATABRICKS_TOKEN_TEST", "") or os.getenv("DATABRICKS_TOKEN", ""),
+        help="Token for the test workspace. Uses DATABRICKS_TOKEN_TEST, falls back to DATABRICKS_TOKEN.",
     )
     parser.add_argument(
         "--limit",
@@ -220,6 +244,8 @@ def main() -> None:
         ("--devices (or DATABRICKS_TABLE_DEVICES)", args.devices),
         ("--wu (or DATABRICKS_TABLE_WINDOWS_UPDATE)", args.wu),
         ("--software (or DATABRICKS_TABLE_INSTALLED_SOFTWARE)", args.software),
+        ("--host-prod (or DATABRICKS_HOST_PROD)", args.host_prod),
+        ("--host-test (or DATABRICKS_HOST_TEST)", args.host_test),
         ("--warehouse-prod (or DATABRICKS_WAREHOUSE_ID)", args.warehouse_prod),
         ("--warehouse-test (or DATABRICKS_WAREHOUSE_ID_TEST)", args.warehouse_test),
     ] if not val.strip()]
@@ -230,14 +256,12 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
-    # Resolve config before building the client so we can show what the SDK
-    # actually picked up, not just what the env vars say.
-    cfg = get_config()
-    client = get_client()
+    prod_client = get_client_for(host=args.host_prod, token=args.token_prod)
+    test_client = get_client_for(host=args.host_test, token=args.token_test)
     output_path = Path(args.output) if args.output else default_output_path()
 
-    print(f"\nWorkspace        : {cfg.host}")
-    print(f"Auth type        : {cfg.auth_type}")
+    print(f"\nProd workspace   : {args.host_prod}")
+    print(f"Test workspace   : {args.host_test}")
     print(f"Warehouse (prod) : {args.warehouse_prod}")
     print(f"Warehouse (test) : {args.warehouse_test}")
     print(f"Limit            : {args.limit} rows per table")
@@ -246,23 +270,23 @@ def main() -> None:
     if args.debug:
         databrickscfg = Path.home() / ".databrickscfg"
         print(f"\n-- DEBUG --")
-        print(f"DATABRICKS_HOST env              : {os.getenv('DATABRICKS_HOST', '(not set)')}")
-        print(f"DATABRICKS_TOKEN env             : {'(set)' if os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
+        print(f"DATABRICKS_HOST_PROD             : {os.getenv('DATABRICKS_HOST_PROD', '(not set)')}")
+        print(f"DATABRICKS_HOST_TEST             : {os.getenv('DATABRICKS_HOST_TEST', '(not set)')}")
+        print(f"DATABRICKS_TOKEN_PROD env        : {'(set)' if os.getenv('DATABRICKS_TOKEN_PROD') or os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
+        print(f"DATABRICKS_TOKEN_TEST env        : {'(set)' if os.getenv('DATABRICKS_TOKEN_TEST') or os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
         print(f"DATABRICKS_WAREHOUSE_ID          : {os.getenv('DATABRICKS_WAREHOUSE_ID', '(not set)')}")
         print(f"DATABRICKS_WAREHOUSE_ID_TEST     : {os.getenv('DATABRICKS_WAREHOUSE_ID_TEST', '(not set)')}")
         print(f"DATABRICKS_TABLE_DEVICES         : {os.getenv('DATABRICKS_TABLE_DEVICES', '(not set)')}")
         print(f"DATABRICKS_TABLE_WINDOWS_UPDATE  : {os.getenv('DATABRICKS_TABLE_WINDOWS_UPDATE', '(not set)')}")
         print(f"DATABRICKS_TABLE_INSTALLED_SOFTWARE: {os.getenv('DATABRICKS_TABLE_INSTALLED_SOFTWARE', '(not set)')}")
         print(f"~/.databrickscfg exists          : {databrickscfg.exists()}")
-        print(f"SDK resolved host                : {cfg.host}")
-        print(f"SDK resolved auth type           : {cfg.auth_type}")
         print(f"-- END DEBUG --\n")
     else:
         print()
 
-    devices = pull_table(client, args.devices, args.warehouse_prod, args.limit, "devices")
-    wu = pull_table(client, args.wu, args.warehouse_test, args.limit, "windows_update")
-    software = pull_table(client, args.software, args.warehouse_test, args.limit, "installed_software")
+    devices = pull_table(prod_client, args.devices, args.warehouse_prod, args.limit, "devices")
+    wu = pull_table(test_client, args.wu, args.warehouse_test, args.limit, "windows_update")
+    software = pull_table(test_client, args.software, args.warehouse_test, args.limit, "installed_software")
 
     print("\nMerging on resource_id ...")
     payload = merge(devices, wu, software)
