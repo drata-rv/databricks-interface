@@ -244,16 +244,18 @@ def main() -> None:
     print(f"Output           : {output_path}")
 
     if args.debug:
+        databrickscfg = Path.home() / ".databrickscfg"
         print(f"\n-- DEBUG --")
-        print(f"DATABRICKS_HOST env         : {os.getenv('DATABRICKS_HOST', '(not set)')}")
-        print(f"DATABRICKS_TOKEN env        : {'(set)' if os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
-        print(f"DATABRICKS_WAREHOUSE_ID     : {os.getenv('DATABRICKS_WAREHOUSE_ID', '(not set)')}")
-        print(f"DATABRICKS_WAREHOUSE_ID_TEST: {os.getenv('DATABRICKS_WAREHOUSE_ID_TEST', '(not set)')}")
-        print(f"DATABRICKS_TABLE_DEVICES    : {os.getenv('DATABRICKS_TABLE_DEVICES', '(not set)')}")
+        print(f"DATABRICKS_HOST env              : {os.getenv('DATABRICKS_HOST', '(not set)')}")
+        print(f"DATABRICKS_TOKEN env             : {'(set)' if os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
+        print(f"DATABRICKS_WAREHOUSE_ID          : {os.getenv('DATABRICKS_WAREHOUSE_ID', '(not set)')}")
+        print(f"DATABRICKS_WAREHOUSE_ID_TEST     : {os.getenv('DATABRICKS_WAREHOUSE_ID_TEST', '(not set)')}")
+        print(f"DATABRICKS_TABLE_DEVICES         : {os.getenv('DATABRICKS_TABLE_DEVICES', '(not set)')}")
         print(f"DATABRICKS_TABLE_WINDOWS_UPDATE  : {os.getenv('DATABRICKS_TABLE_WINDOWS_UPDATE', '(not set)')}")
         print(f"DATABRICKS_TABLE_INSTALLED_SOFTWARE: {os.getenv('DATABRICKS_TABLE_INSTALLED_SOFTWARE', '(not set)')}")
-        print(f"SDK resolved host           : {cfg.host}")
-        print(f"SDK resolved auth type      : {cfg.auth_type}")
+        print(f"~/.databrickscfg exists          : {databrickscfg.exists()}")
+        print(f"SDK resolved host                : {cfg.host}")
+        print(f"SDK resolved auth type           : {cfg.auth_type}")
         print(f"-- END DEBUG --\n")
     else:
         print()
