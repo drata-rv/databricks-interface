@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db.auth import get_client, get_client_for, get_config, load_env
 from db import queries
+from db.transform import transform_all
 
 # Load .env before parse_args() so os.getenv() defaults are populated
 load_env()
@@ -289,8 +290,12 @@ def main() -> None:
     software = pull_table(test_client, args.software, args.warehouse_test, args.limit, "installed_software")
 
     print("\nMerging on resource_id ...")
-    payload = merge(devices, wu, software)
-    print(f"  {len(payload)} device records assembled.")
+    merged = merge(devices, wu, software)
+    print(f"  {len(merged)} device records assembled.")
+
+    print("Transforming to Drata MDM format ...")
+    payload = transform_all(merged)
+    print(f"  {len(payload)} records transformed.")
 
     write_json(payload, output_path)
     print(f"\n[OK] Written to {output_path}\n")
