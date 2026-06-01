@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from db.auth import get_client, get_client_for, load_env
+from db.auth import get_client, load_env
 from db import queries
 
 # Load .env before parse_args() so os.getenv() defaults are populated
@@ -189,18 +189,6 @@ def parse_args() -> argparse.Namespace:
         help="Warehouse ID for the test catalog tables. Uses DATABRICKS_WAREHOUSE_ID_TEST.",
     )
     parser.add_argument(
-        "--host-test",
-        metavar="URL",
-        default=os.getenv("DATABRICKS_HOST_TEST", ""),
-        help="Workspace URL for the test catalog (e.g. https://nationwide-irm-test-ohio.cloud.databricks.com). Uses DATABRICKS_HOST_TEST.",
-    )
-    parser.add_argument(
-        "--token-test",
-        metavar="TOKEN",
-        default=os.getenv("DATABRICKS_TOKEN_TEST", "") or os.getenv("DATABRICKS_TOKEN", ""),
-        help="PAT for the test workspace. Uses DATABRICKS_TOKEN_TEST, falls back to DATABRICKS_TOKEN.",
-    )
-    parser.add_argument(
         "--limit",
         type=int,
         default=int(os.getenv("DATABRICKS_LIMIT", "1000")),
@@ -228,7 +216,6 @@ def main() -> None:
         ("--software (or DATABRICKS_TABLE_INSTALLED_SOFTWARE)", args.software),
         ("--warehouse-prod (or DATABRICKS_WAREHOUSE_ID)", args.warehouse_prod),
         ("--warehouse-test (or DATABRICKS_WAREHOUSE_ID_TEST)", args.warehouse_test),
-        ("--host-test (or DATABRICKS_HOST_TEST)", args.host_test),
     ] if not val.strip()]
 
     if missing:
@@ -237,20 +224,18 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
-    prod_client = get_client()
-    test_client = get_client_for(host=args.host_test, token=args.token_test)
+    client = get_client()
     output_path = Path(args.output) if args.output else default_output_path()
 
-    print(f"\nProd workspace   : {os.getenv('DATABRICKS_HOST', '')}")
-    print(f"Test workspace   : {args.host_test}")
+    print(f"\nWorkspace        : {os.getenv('DATABRICKS_HOST', '')}")
     print(f"Warehouse (prod) : {args.warehouse_prod}")
     print(f"Warehouse (test) : {args.warehouse_test}")
     print(f"Limit            : {args.limit} rows per table")
     print(f"Output           : {output_path}\n")
 
-    devices = pull_table(prod_client, args.devices, args.warehouse_prod, args.limit, "devices")
-    wu = pull_table(test_client, args.wu, args.warehouse_test, args.limit, "windows_update")
-    software = pull_table(test_client, args.software, args.warehouse_test, args.limit, "installed_software")
+    devices = pull_table(client, args.devices, args.warehouse_prod, args.limit, "devices")
+    wu = pull_table(client, args.wu, args.warehouse_test, args.limit, "windows_update")
+    software = pull_table(client, args.software, args.warehouse_test, args.limit, "installed_software")
 
     print("\nMerging on resource_id ...")
     payload = merge(devices, wu, software)
