@@ -35,8 +35,11 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from db.auth import get_client
+from db.auth import get_client, load_env
 from db import queries
+
+# Load .env before parse_args() so os.getenv() defaults are populated
+load_env()
 
 
 # ---------------------------------------------------------------------------

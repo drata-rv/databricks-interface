@@ -16,8 +16,12 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.config import Config
 
 
-def _load_dotenv() -> None:
-    """Load .env from the project root if python-dotenv is available."""
+def load_env() -> None:
+    """Load .env from the project root if python-dotenv is available.
+
+    Call this before any os.getenv() calls in scripts so that .env values
+    are available when argument defaults are resolved.
+    """
     try:
         from dotenv import load_dotenv
         env_path = Path(__file__).parent.parent / ".env"
@@ -25,6 +29,10 @@ def _load_dotenv() -> None:
             load_dotenv(env_path)
     except ImportError:
         pass
+
+
+# Keep the private alias for internal use
+_load_dotenv = load_env
 
 
 def get_client() -> WorkspaceClient:
