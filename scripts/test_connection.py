@@ -23,7 +23,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,7 +82,7 @@ def write_json(records: List[Dict[str, Any]], output_path: Path) -> None:
 
 def default_output_path(table: str) -> Path:
     table_slug = table.replace(".", "_")
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return Path("output") / f"{table_slug}_{timestamp}.json"
 
 
