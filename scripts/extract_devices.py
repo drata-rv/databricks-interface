@@ -93,7 +93,13 @@ def pull_table(client: Any, table: str, warehouse_id: str, limit: int, label: st
         print(f"  {len(records)} rows retrieved.")
         return [clean(r) for r in records]
     except Exception as e:
-        print(f"  [FAIL] Could not pull {label}: {e}")
+        # Extract the meaningful part of the error before the SDK config dump
+        raw = str(e)
+        short = raw.split(". Config:")[0].split(". Env:")[0].strip()
+        print(f"  [FAIL] {label}")
+        print(f"         Table     : {table}")
+        print(f"         Warehouse : {warehouse_id}")
+        print(f"         Error     : {short}")
         sys.exit(1)
 
 
