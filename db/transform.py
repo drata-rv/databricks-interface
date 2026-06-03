@@ -7,8 +7,10 @@ Fields populated from current data sources:
   autoUpdateEnabled, autoUpdateExplanation,
   passwordManagerEnabled, passwordManagerExplanation
 
+Fields populated from the user identity table (joined on Netbios_Name0):
+  personnelId          -- User_Princiipal_Name0 (source column has the double-i typo)
+
 Fields set to null -- require additional SCCM tables or data sources:
-  personnelId          -- needs HR / identity lookup
   firewallEnabled      -- needs gs_firewall or windows services table
   encryptionEnabled    -- needs BitLocker / gs_encryptablevolume table
   screenLockEnabled    -- needs gs_screensaver or policy table
@@ -102,11 +104,28 @@ def _auto_update(wu: Dict[str, Any]) -> Tuple[bool, str]:
 # Main transform
 # ---------------------------------------------------------------------------
 
+def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
+    """
+    Extract the user's email from the user identity record for use as personnelId.
+
+    Column name note: the source table has a typo -- 'User_Princiipal_Name0' (double-i).
+    We try the typo'd spelling first, then the correct spelling as a fallback in case
+    Nationwide corrects it in a future schema update.
+    """
+    return (
+        user.get('User_Princiipal_Name0')   # actual column name in source (double-i typo)
+        or user.get('User_Principal_Name0') # fallback if typo is corrected
+        or user.get('Unique_User_Name0')    # last resort: domain\username
+        or None
+    )
+
+
 def to_drata_record(merged: Dict[str, Any]) -> Dict[str, Any]:
     """Transform a merged SCCM record into a Drata Custom MDM payload."""
     device = merged.get('device', {})
     wu = merged.get('windows_update', {})
     software = merged.get('installed_software', [])
+    user = merged.get('user', {})
 
     app_list = _build_app_list(software)
     av_enabled, av_apps = _detect_apps(software, ANTIVIRUS_SIGNATURES)
@@ -115,7 +134,7 @@ def to_drata_record(merged: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         # Identity
-        'personnelId': None,  # Requires HR / identity lookup
+        'personnelId': _resolve_personnel_id(user),
         'alias': device.get('Name0') or device.get('Netbios_Name0'),
         'externalId': device.get('AADDeviceID') or str(merged.get('resource_id')),
         'serialNumber': device.get('SerialNumber'),

@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
 """
-Device ETL: pulls three SCCM tables from Databricks, joins them on resource_id,
-and writes a single JSON file ready for Drata Custom Device Connection.
+Device ETL: pulls four SCCM tables from Databricks, joins them on resource_id
+and Netbios_Name0, and writes a single JSON file ready for Drata Custom Device Connection.
 
 Output structure per device:
     {
         "resource_id": 12345,
-        "device":            { ...fields from the main device table... },
-        "windows_update":    { ...fields from t_sccm_gs_windowsupdate... },
-        "installed_software": [ ...one entry per row from t_sccm_gs_installed_software... ]
+        "device":             { ...fields from the main device table... },
+        "windows_update":     { ...fields from t_sccm_gs_windowsupdate... },
+        "installed_software": [ ...one entry per row from t_sccm_gs_installed_software... ],
+        "user":               { ...fields from the user identity table... }
     }
 
 Usage:
     python scripts/extract_devices.py \\
         --devices    catalog.schema.t_sccm_v_r_system \\
         --wu         catalog.schema.t_sccm_gs_windowsupdate \\
-        --software   catalog.schema.t_sccm_gs_installed_software
+        --software   catalog.schema.t_sccm_gs_installed_software \\
+        --users      catalog.schema.t_sccm_user_table
 
 Table paths and warehouse IDs can also be set via environment variables:
     DATABRICKS_TABLE_DEVICES
     DATABRICKS_TABLE_WINDOWS_UPDATE
     DATABRICKS_TABLE_INSTALLED_SOFTWARE
+    DATABRICKS_TABLE_USERS
     DATABRICKS_WAREHOUSE_ID          -- used for the devices table (prod)
-    DATABRICKS_WAREHOUSE_ID_TEST     -- used for windows_update and installed_software (test)
+    DATABRICKS_WAREHOUSE_ID_TEST     -- used for all test catalog tables (wu, software, users)
                                         Falls back to DATABRICKS_WAREHOUSE_ID if not set.
 
-All three tables are required. Script exits with a non-zero code if any pull fails.
+All four tables are required. Script exits with a non-zero code if any pull fails.
 """
 
 import argparse
@@ -108,10 +111,15 @@ def merge(
     devices: List[Dict[str, Any]],
     windows_update: List[Dict[str, Any]],
     installed_software: List[Dict[str, Any]],
+    users: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Left-join windows_update and installed_software onto devices using resource_id.
-    Devices with no match in the secondary tables still appear in the output.
+    Left-join all secondary tables onto devices.
+
+    - windows_update and installed_software join on resource_id.
+    - users joins on Netbios_Name0 (machine name present in both tables).
+
+    Devices with no match in a secondary table still appear; their key is {} or [].
     """
     wu_index: Dict[int, Dict[str, Any]] = {}
     for row in windows_update:
@@ -126,15 +134,25 @@ def merge(
             entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
             sw_index.setdefault(rid, []).append(entry)
 
+    # User table: keyed by Netbios_Name0 -- one record per machine
+    user_index: Dict[str, Dict[str, Any]] = {}
+    for row in users:
+        netbios = row.get('Netbios_Name0') or row.get('netbios_name0')
+        if netbios:
+            user_index[netbios] = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
+
     output = []
     for device in devices:
         rid = get_resource_id(device)
+        # Netbios_Name0 is the join key between the device and user tables
+        netbios = device.get('Netbios_Name0') or device.get('Name0')
         device_fields = {k: v for k, v in device.items() if k not in ("resource_id", "ResourceID", "ResourceType")}
         output.append({
             "resource_id": rid,
             "device": device_fields,
             "windows_update": wu_index.get(rid, {}),
             "installed_software": sw_index.get(rid, []),
+            "user": user_index.get(netbios, {}),
         })
 
     return output
@@ -179,6 +197,12 @@ def parse_args() -> argparse.Namespace:
         metavar="CATALOG.SCHEMA.TABLE",
         default=os.getenv("DATABRICKS_TABLE_INSTALLED_SOFTWARE", ""),
         help="Fully qualified path to t_sccm_gs_installed_software.",
+    )
+    parser.add_argument(
+        "--users",
+        metavar="CATALOG.SCHEMA.TABLE",
+        default=os.getenv("DATABRICKS_TABLE_USERS", ""),
+        help="Fully qualified path to the user identity table (si_test_catalog). Uses DATABRICKS_TABLE_USERS.",
     )
     parser.add_argument(
         "--warehouse-prod",
@@ -254,6 +278,7 @@ def main() -> None:
         ("--devices (or DATABRICKS_TABLE_DEVICES)", args.devices),
         ("--wu (or DATABRICKS_TABLE_WINDOWS_UPDATE)", args.wu),
         ("--software (or DATABRICKS_TABLE_INSTALLED_SOFTWARE)", args.software),
+        ("--users (or DATABRICKS_TABLE_USERS)", args.users),
         ("--host-prod (or DATABRICKS_HOST_PROD)", args.host_prod),
         ("--host-test (or DATABRICKS_HOST_TEST)", args.host_test),
         ("--warehouse-prod (or DATABRICKS_WAREHOUSE_ID)", args.warehouse_prod),
@@ -292,6 +317,7 @@ def main() -> None:
         print(f"DATABRICKS_TABLE_DEVICES         : {os.getenv('DATABRICKS_TABLE_DEVICES', '(not set)')}")
         print(f"DATABRICKS_TABLE_WINDOWS_UPDATE  : {os.getenv('DATABRICKS_TABLE_WINDOWS_UPDATE', '(not set)')}")
         print(f"DATABRICKS_TABLE_INSTALLED_SOFTWARE: {os.getenv('DATABRICKS_TABLE_INSTALLED_SOFTWARE', '(not set)')}")
+        print(f"DATABRICKS_TABLE_USERS           : {os.getenv('DATABRICKS_TABLE_USERS', '(not set)')}")
         print(f"~/.databrickscfg exists          : {databrickscfg.exists()}")
         print(f"-- END DEBUG --\n")
     else:
@@ -300,9 +326,10 @@ def main() -> None:
     devices = pull_table(prod_client, args.devices, args.warehouse_prod, args.limit, "devices")
     wu = pull_table(test_client, args.wu, args.warehouse_test, args.limit, "windows_update")
     software = pull_table(test_client, args.software, args.warehouse_test, args.limit, "installed_software")
+    users = pull_table(test_client, args.users, args.warehouse_test, args.limit, "users")
 
-    print("\nMerging on resource_id ...")
-    merged = merge(devices, wu, software)
+    print("\nMerging on resource_id / Netbios_Name0 ...")
+    merged = merge(devices, wu, software, users)
     print(f"  {len(merged)} device records assembled.")
 
     print("Transforming to Drata MDM format ...")
