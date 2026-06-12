@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db.auth import get_client, get_config, load_env
 from db import queries
+from db.queries import rows_to_records
 
 # Load .env before parse_args() so os.getenv() defaults are populated
 load_env()
@@ -65,14 +66,6 @@ def skip(reason: str) -> None:
 # ---------------------------------------------------------------------------
 # JSON serialisation
 # ---------------------------------------------------------------------------
-
-def rows_to_records(
-    columns: List[str],
-    rows: List[List[Any]],
-) -> List[Dict[str, Any]]:
-    """Zip column names and row values into a list of dicts."""
-    return [dict(zip(columns, row)) for row in rows]
-
 
 def write_json(records: List[Dict[str, Any]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)

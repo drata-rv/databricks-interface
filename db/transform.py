@@ -74,23 +74,35 @@ def _platform_name(os_string: Optional[str]) -> str:
     s = (os_string or '').lower()
     if 'windows' in s:
         return 'WINDOWS'
-    if 'mac' in s or 'darwin' in s:
+    if 'mac' in s or 'darwin' in s or 'macos' in s:
         return 'MACOS'
     if 'linux' in s:
         return 'LINUX'
+    if 'ios' in s or 'iphone' in s or 'ipad' in s:
+        return 'IOS'
+    if 'android' in s:
+        return 'ANDROID'
+    # Drata may reject UNKNOWN -- if this surfaces in output, check Operating_System_Name_and0
     return 'UNKNOWN'
 
 
 def _build_app_list(software: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [
-        {
-            'name': app.get('product_name_0'),
-            'version': app.get('product_version_0'),
-            'description': app.get('product_name_0'),
-        }
-        for app in software
-        if app.get('product_name_0')
-    ]
+    seen: set = set()
+    result = []
+    for app in software:
+        name = app.get('product_name_0')
+        if not name:
+            continue
+        version = app.get('product_version_0') or ''
+        key = (name, version)
+        if key not in seen:
+            seen.add(key)
+            result.append({
+                'name': name,
+                'version': app.get('product_version_0'),
+                'description': name,
+            })
+    return result
 
 
 def _auto_update(wu: Dict[str, Any]) -> Tuple[bool, str]:
@@ -136,7 +148,13 @@ def to_drata_record(merged: Dict[str, Any]) -> Dict[str, Any]:
         # Identity
         'personnelId': _resolve_personnel_id(user),
         'alias': device.get('Name0') or device.get('Netbios_Name0'),
-        'externalId': device.get('AADDeviceID') or str(merged.get('resource_id')),
+        # AADDeviceID is the preferred stable identifier; Unique_User_Name0 (domain\user)
+        # is a more meaningful fallback than the SCCM-internal ResourceID integer
+        'externalId': (
+            device.get('AADDeviceID')
+            or user.get('Unique_User_Name0')
+            or str(merged.get('resource_id'))
+        ),
         'serialNumber': device.get('SerialNumber'),
         'model': device.get('CPUType0'),
         'macAddress': None,  # Not present in current SCCM tables

@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db.auth import get_client, get_client_for, get_config, load_env
 from db import queries
+from db.queries import rows_to_records
 from db.transform import transform_all
 
 # Load .env before parse_args() so os.getenv() defaults are populated
@@ -54,6 +56,9 @@ load_env()
 # ---------------------------------------------------------------------------
 STRIP_PREFIXES = ("__",)
 
+_MAX_RETRIES = 3
+_RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
+
 
 def is_internal(col: str) -> bool:
     return any(col.startswith(p) for p in STRIP_PREFIXES)
@@ -62,10 +67,6 @@ def is_internal(col: str) -> bool:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def rows_to_records(columns: List[str], rows: List[List[Any]]) -> List[Dict[str, Any]]:
-    return [dict(zip(columns, row)) for row in rows]
-
 
 def clean(record: Dict[str, Any]) -> Dict[str, Any]:
     """Strip internal pipeline columns from a record."""
@@ -120,24 +121,31 @@ def pull_table(
         parts.append(f"LIMIT {limit}")
     statement = " ".join(parts)
     print(f"  Pulling {label} ({table}) ...")
-    try:
-        result = queries.run_sql(
-            client,
-            statement=statement,
-            warehouse_id=warehouse_id,
-            timeout_seconds=timeout,
-        )
-        records = rows_to_records(result["columns"], result["rows"])
-        print(f"  {len(records)} rows retrieved.")
-        return [clean(r) for r in records]
-    except Exception as e:
-        raw = str(e)
-        short = raw.split(". Config:")[0].split(". Env:")[0].strip()
-        print(f"  [FAIL] {label}")
-        print(f"         Table     : {table}")
-        print(f"         Warehouse : {warehouse_id}")
-        print(f"         Error     : {short}")
-        sys.exit(1)
+    last_error: Optional[Exception] = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            result = queries.run_sql(
+                client,
+                statement=statement,
+                warehouse_id=warehouse_id,
+                timeout_seconds=timeout,
+            )
+            records = rows_to_records(result["columns"], result["rows"])
+            print(f"  {len(records)} rows retrieved.")
+            return [clean(r) for r in records]
+        except Exception as e:
+            last_error = e
+            if attempt < _MAX_RETRIES:
+                wait = _RETRY_DELAYS[attempt - 1]
+                print(f"  [RETRY {attempt}/{_MAX_RETRIES}] {label} failed, retrying in {wait}s ...")
+                time.sleep(wait)
+    raw = str(last_error)
+    short = raw.split(". Config:")[0].split(". Env:")[0].strip()
+    print(f"  [FAIL] {label} (all {_MAX_RETRIES} attempts failed)")
+    print(f"         Table     : {table}")
+    print(f"         Warehouse : {warehouse_id}")
+    print(f"         Error     : {short}")
+    sys.exit(1)
 
 
 def merge(
@@ -172,7 +180,11 @@ def merge(
     for row in users:
         netbios = row.get('Netbios_Name0') or row.get('netbios_name0')
         if netbios:
-            user_index[netbios] = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
+            entry = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
+            if netbios in user_index:
+                print(f"  [WARN] duplicate user record for {netbios!r} -- keeping first")
+            else:
+                user_index[netbios] = entry
 
     output = []
     for device in devices:

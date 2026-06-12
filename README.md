@@ -1,48 +1,48 @@
 # Databricks Interface
 
-Python interface to the Databricks REST API using the official `databricks-sdk`. Authenticates against a Databricks workspace, browses Unity Catalog metadata, executes SQL against a target warehouse, and exports table data as a JSON payload.
+Python interface to the Databricks REST API. Authenticates against two Databricks workspaces, pulls four SCCM device tables, joins them on `resource_id` and `Netbios_Name0`, and produces a JSON payload in the Drata Custom Device Connection format.
 
 ---
 
 ## Prerequisites
 
 - Python 3.8+
-- A Databricks workspace with Unity Catalog enabled
-- A running SQL warehouse (Serverless or Pro tier)
-- An account with at least `CAN USE` on the warehouse and `SELECT` on the target catalog/schema
+- Two Databricks workspaces (prod and test) with Unity Catalog enabled
+- A running SQL warehouse in each workspace (Serverless or Pro tier)
+- An account with `CAN USE` on each warehouse and `SELECT` on the target catalogs and schemas
+- A personal access token for each workspace (or a shared token if both workspaces accept the same one)
 
 ---
 
 ## Databricks Setup
 
-### 1. Create a SQL Warehouse
+### 1. Create SQL Warehouses
 
-Go to **SQL > SQL Warehouses > Create warehouse**. After creation, open the warehouse and go to the **Connection details** tab to copy the warehouse ID. You will need it in your `.env` file.
+In each workspace, go to **SQL > SQL Warehouses > Create warehouse**. After creation, open the warehouse, go to the **Connection details** tab, and copy the warehouse ID.
 
-### 2. Generate a Personal Access Token
+- Prod warehouse ID goes into `DATABRICKS_WAREHOUSE_ID`
+- Test warehouse ID goes into `DATABRICKS_WAREHOUSE_ID_TEST`
 
-Go to **Settings > Developer > Access tokens > Generate new token**. Set a reasonable expiry and copy the token immediately. This is used for local development. For production deployments use a service principal with OAuth M2M (see step 4).
+### 2. Generate Personal Access Tokens
 
-### 3. Grant permissions
+Go to **Settings > Developer > Access tokens > Generate new token** in each workspace. Set a reasonable expiry and copy the token immediately. The token needs the `sql`, `unity-catalog`, and `workspace` scopes.
 
-The user or service principal running the scripts needs the following:
+If both workspaces accept the same token, set only `DATABRICKS_TOKEN` and leave the workspace-specific vars unset.
 
-- `CAN USE` on the SQL warehouse
-- `USE CATALOG` on the target catalog
-- `USE SCHEMA` on the target schema
-- `SELECT` on the tables to be queried
+### 3. Grant Permissions
 
-Set these in **Catalog Explorer** or via SQL:
+The account or service principal running the scripts needs the following in each workspace:
 
 ```sql
+GRANT CAN USE ON SQL WAREHOUSE <warehouse-id> TO `user@example.com`;
 GRANT USE CATALOG ON CATALOG <catalog> TO `user@example.com`;
 GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `user@example.com`;
 GRANT SELECT ON SCHEMA <catalog>.<schema> TO `user@example.com`;
 ```
 
-### 4. (Production) Create a Service Principal
+### 4. (Production) Service Principal
 
-In the Databricks account console go to **User management > Service principals > Add service principal**. Generate a client secret and grant the principal the same permissions listed above. Use `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`, and `DATABRICKS_AZURE_TENANT_ID` in place of `DATABRICKS_TOKEN` in your `.env` file.
+In the Databricks account console go to **User management > Service principals > Add service principal**. Generate a client secret and grant it the same permissions above. Use `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`, and `DATABRICKS_AZURE_TENANT_ID` in place of `DATABRICKS_TOKEN`.
 
 ---
 
@@ -62,61 +62,93 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Copy the credential template and fill in your values:
+Copy the credential template:
 
 ```bash
 cp .env.example .env        # Mac/Linux
 copy .env.example .env      # Windows
 ```
 
-Minimum required fields in `.env`:
-
-```
-DATABRICKS_HOST=https://your-workspace.azuredatabricks.net
-DATABRICKS_TOKEN=dapi...
-DATABRICKS_WAREHOUSE_ID=<warehouse-id>
-```
-
-Optional fields for discovery and extraction:
-
-```
-DATABRICKS_CATALOG=<catalog-name>
-DATABRICKS_SCHEMA=<schema-name>
-DATABRICKS_TABLE=<catalog.schema.table_name>
-DATABRICKS_LIMIT=1000
-```
-
-The `.env` file is git-ignored. Never commit credentials.
+The `.env.example` file is pre-filled with all known workspace URLs, warehouse IDs, and table paths. The only values you need to supply are the tokens.
 
 ---
 
-## Running the Script
+## Configuration
 
-**Connectivity and discovery only:**
+| Variable | Required | Description |
+|---|---|---|
+| `DATABRICKS_HOST_PROD` | Yes | Prod workspace URL |
+| `DATABRICKS_TOKEN_PROD` | Yes* | Token for the prod workspace |
+| `DATABRICKS_WAREHOUSE_ID` | Yes | Warehouse ID in the prod workspace |
+| `DATABRICKS_HOST_TEST` | Yes | Test workspace URL |
+| `DATABRICKS_TOKEN_TEST` | Yes* | Token for the test workspace |
+| `DATABRICKS_WAREHOUSE_ID_TEST` | Yes | Warehouse ID in the test workspace |
+| `DATABRICKS_TABLE_DEVICES` | Yes | Fully qualified devices table path (prod catalog) |
+| `DATABRICKS_TABLE_WINDOWS_UPDATE` | Yes | Fully qualified path to t_sccm_gs_windowsupdate (test catalog) |
+| `DATABRICKS_TABLE_INSTALLED_SOFTWARE` | Yes | Fully qualified path to t_sccm_gs_installed_software (test catalog) |
+| `DATABRICKS_TABLE_USERS` | Yes | Fully qualified path to the user identity table (test catalog) |
+| `DATABRICKS_LIMIT` | No | Max device rows to pull per run (default: 1000) |
+| `DATABRICKS_QUERY_TIMEOUT` | No | Per-query timeout in seconds, covers cold warehouse start (default: 300) |
+| `DATABRICKS_TOKEN` | No | Shared token fallback used by both workspaces if workspace-specific vars are not set |
+
+*If both workspaces share a token, set only `DATABRICKS_TOKEN`.
+
+For `test_connection.py`, which uses the SDK's single-workspace credential chain, set `DATABRICKS_HOST` to the workspace you want to probe (copy from `DATABRICKS_HOST_PROD` or `DATABRICKS_HOST_TEST`) and `DATABRICKS_TOKEN` to the matching token.
+
+---
+
+## Running the Scripts
+
+### Step 1: Verify connectivity
+
+Run this first to confirm auth, warehouse access, and table visibility before running the full ETL:
+
 ```bash
 python scripts/test_connection.py
 ```
 
-**Pull a specific table and export to JSON:**
+To pull a sample from a specific table and inspect the raw data:
+
 ```bash
-python scripts/test_connection.py --table catalog.schema.table_name
+python scripts/test_connection.py --table catalog.schema.table_name --limit 10
 ```
 
-**Limit rows and specify output path:**
+### Step 2: Run the ETL
+
 ```bash
-python scripts/test_connection.py --table catalog.schema.table_name --limit 500 --output results/export.json
+python scripts/extract_devices.py
 ```
 
-The `--table` flag overrides `DATABRICKS_TABLE` in `.env`. If neither is set, step 7 is skipped.
+Two output files are written per run:
+
+- `output/devices_<timestamp>_raw.json` -- merged SCCM data exactly as pulled
+- `output/devices_<timestamp>_drata.json` -- transformed into Drata Custom Device Connection format
+
+Use `--debug` to print the full resolved environment before running:
+
+```bash
+python scripts/extract_devices.py --debug
+```
 
 ---
 
-## What the Script Does
+## What the ETL Does
 
-The script runs 8 steps in sequence. Each step prints `[OK]`, `[FAIL]`, or `[SKIP]`. Steps are independent so a failure in one does not block the rest.
+1. Pulls the devices table from the prod workspace (up to `DATABRICKS_LIMIT` rows)
+2. Derives `resource_id` and `Netbios_Name0` from that device set
+3. Queries windows_update, installed_software, and users from the test workspace using IN-clause filters scoped to those device IDs -- no row cap on secondary tables
+4. Left-joins all tables onto devices: windows_update and installed_software join on `resource_id`, users joins on `Netbios_Name0`
+5. Transforms each merged record into the Drata Custom Device Connection JSON shape
+6. Writes both the raw merged record and the Drata payload per run
+
+The `output/` directory is git-ignored. Each run produces a new timestamped pair of files.
+
+---
+
+## test_connection.py Steps
 
 | Step | What it checks | Requires |
-|------|---------------|----------|
+|---|---|---|
 | 0 | Resolved auth config (host and auth type) | `DATABRICKS_HOST` + token |
 | 1 | Workspace root connectivity | Auth |
 | 2 | Available SQL warehouses and their state | Auth |
@@ -126,7 +158,7 @@ The script runs 8 steps in sequence. Each step prints `[OK]`, `[FAIL]`, or `[SKI
 | 6 | SQL smoke test (`SELECT 1`) | `DATABRICKS_WAREHOUSE_ID` |
 | 7 | Table pull and JSON export | `DATABRICKS_WAREHOUSE_ID` + `--table` |
 
-Step 7 writes output to `output/<catalog>_<schema>_<table>_<timestamp>.json` by default. The `output/` directory is git-ignored.
+Each step prints `[OK]`, `[FAIL]`, or `[SKIP]`. Steps are independent -- a failure in one does not block the rest.
 
 ---
 
@@ -135,11 +167,13 @@ Step 7 writes output to `output/<catalog>_<schema>_<table>_<timestamp>.json` by 
 ```
 db/
   auth.py            -- WorkspaceClient factory; reads credentials from environment
-  queries.py         -- Catalog browsing and SQL execution helpers
+  queries.py         -- Catalog browsing, SQL execution, result helpers
+  transform.py       -- Maps merged SCCM records to Drata Custom Device Connection format
 scripts/
-  test_connection.py -- Connectivity test, data discovery, and JSON export
+  test_connection.py -- Connectivity probe and single-table export
+  extract_devices.py -- Four-table ETL: pull, merge, transform, write
 output/              -- Extracted JSON files (git-ignored)
-.env.example         -- Credential and config template
+.env.example         -- Credential and config template (pre-filled)
 requirements.txt
 ```
 
@@ -153,4 +187,4 @@ The SDK resolves credentials in this order with no code changes required:
 2. Named profile in `~/.databrickscfg` (select via `DATABRICKS_CONFIG_PROFILE`)
 3. Cloud-native auth (Azure CLI, AWS IAM, GCP service account)
 
-Set the appropriate environment variables in your CI/CD or orchestration platform to use the same script in deployed contexts.
+Set the appropriate environment variables in your CI/CD or orchestration platform to use the same scripts in deployed contexts.

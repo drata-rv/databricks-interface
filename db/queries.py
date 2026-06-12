@@ -169,3 +169,10 @@ def run_sql(
         next_chunk = chunk.next_chunk_index
 
     return {"columns": columns, "rows": all_rows, "state": state.value}
+
+
+def rows_to_records(
+    columns: List[str],
+    rows: List[List[Any]],
+) -> List[Dict[str, Any]]:
+    return [dict(zip(columns, row)) for row in rows]
