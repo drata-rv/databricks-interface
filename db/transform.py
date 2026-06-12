@@ -317,6 +317,42 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Test mode
+# ---------------------------------------------------------------------------
+
+_TEST_PASSING_FIELDS: Dict[str, Any] = {
+    'antivirusEnabled': True,
+    'antivirusExplanation': {'antivirusApps': ['Test Mode']},
+    'autoUpdateEnabled': True,
+    'autoUpdateExplanation': 'Auto download and install',
+    'passwordManagerEnabled': True,
+    'passwordManagerExplanation': {'passwordManagerApps': ['Test Mode']},
+    'encryptionEnabled': True,
+    'encryptionExplanation': {
+        'bootPartitionEncryptionDetails': {
+            'partitionFileVault2Percent': 100,
+            'partitionFileVault2State': 'ENCRYPTED',
+            'partitionName': 'C:',
+        }
+    },
+    'screenLockEnabled': True,
+    'screenLockExplanation': 'ScreenLock delay is 15 minutes',
+    'screenLockTime': 15,
+}
+
+
+def apply_test_overrides(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Force all 5 Drata monitoring fields to a passing state.
+
+    Identity fields (personnelId, alias, externalId, serialNumber, etc.) are
+    preserved from the real records so the push targets actual users/devices.
+    Only the 5 monitored boolean fields and their explanations are overridden.
+    """
+    return [{**r, **_TEST_PASSING_FIELDS} for r in records]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 

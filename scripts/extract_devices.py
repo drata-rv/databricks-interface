@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from db.auth import get_client_for, load_env
 from db import queries
 from db.queries import rows_to_records
-from db.transform import transform_all
+from db.transform import transform_all, apply_test_overrides
 
 load_env()
 
@@ -258,11 +258,12 @@ def write_json(payload: List[Dict[str, Any]], output_path: Path) -> None:
         json.dump(payload, f, indent=2, default=str)
 
 
-def default_output_paths() -> Tuple[Path, Path]:
+def default_output_paths(test_mode: bool = False) -> Tuple[Path, Path]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    tag = "_test" if test_mode else ""
     return (
-        Path("output") / f"devices_{timestamp}_raw.json",
-        Path("output") / f"devices_{timestamp}_drata.json",
+        Path("output") / f"devices_{timestamp}{tag}_raw.json",
+        Path("output") / f"devices_{timestamp}{tag}_drata.json",
     )
 
 
@@ -341,6 +342,16 @@ def parse_args() -> argparse.Namespace:
         help="Path for the Drata-formatted JSON. Defaults to output/devices_<timestamp>_drata.json.",
     )
     parser.add_argument(
+        "--test-mode",
+        action="store_true",
+        default=False,
+        help=(
+            "Pull 5 real identities and push them to Drata with all 5 monitoring fields "
+            "forced to a passing state. Uses real personnelId/alias/externalId so records "
+            "land on actual users. Intended for verifying the Drata connection end-to-end."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -377,9 +388,12 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
+    if args.test_mode:
+        args.limit = 5
+
     prod_client = get_client_for(host=args.host_prod, token=args.token_prod)
     test_client = get_client_for(host=args.host_test, token=args.token_test)
-    default_raw, default_drata = default_output_paths()
+    default_raw, default_drata = default_output_paths(test_mode=args.test_mode)
     raw_path = Path(args.output_raw) if args.output_raw else default_raw
     drata_path = Path(args.output_drata) if args.output_drata else default_drata
 
@@ -391,6 +405,8 @@ def main() -> None:
     print(f"Query timeout    : {args.timeout}s per table")
     print(f"Output (raw)     : {raw_path}")
     print(f"Output (drata)   : {drata_path}")
+    if args.test_mode:
+        print(f"Mode             : TEST MODE (5 real identities, all 5 fields forced passing)")
     if args.dry_run:
         print(f"Mode             : DRY RUN (Drata push skipped)")
 
@@ -470,7 +486,11 @@ def main() -> None:
     # Step 4: transform to Drata MDM format
     print("Transforming to Drata MDM format ...")
     drata_payload = transform_all(merged)
-    print(f"  {len(drata_payload)} records transformed.")
+    if args.test_mode:
+        drata_payload = apply_test_overrides(drata_payload)
+        print(f"  [TEST MODE] {len(drata_payload)} records with all 5 monitoring fields forced to passing.")
+    else:
+        print(f"  {len(drata_payload)} records transformed.")
 
     # Step 5: write output files
     write_json(merged, raw_path)
