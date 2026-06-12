@@ -24,3 +24,6 @@ output/
 .idea/
 .vscode/
 *.log
+
+# OS
+.DS_Store
