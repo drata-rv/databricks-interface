@@ -341,6 +341,17 @@ _TEST_PASSING_FIELDS: Dict[str, Any] = {
 }
 
 
+def apply_sandbox_overrides(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Replace @nationwide.com with @sandbox.nationwide.com in personnelId for sandbox testing."""
+    result = []
+    for r in records:
+        pid = r.get('personnelId')
+        if isinstance(pid, str) and '@nationwide.com' in pid:
+            r = {**r, 'personnelId': pid.replace('@nationwide.com', '@sandbox.nationwide.com')}
+        result.append(r)
+    return result
+
+
 def apply_test_overrides(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Force all 5 Drata monitoring fields to a passing state.

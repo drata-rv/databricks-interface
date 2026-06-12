@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from db.auth import get_client_for, load_env
 from db import queries
 from db.queries import rows_to_records
-from db.transform import transform_all, apply_test_overrides
+from db.transform import transform_all, apply_test_overrides, apply_sandbox_overrides
 
 load_env()
 
@@ -407,6 +407,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sandbox",
+        action="store_true",
+        default=False,
+        help="Replace @nationwide.com with @sandbox.nationwide.com in personnelId before pushing.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -586,6 +592,9 @@ def main() -> None:
         print(f"  [TEST MODE] {len(drata_payload)} records with all 5 monitoring fields forced to passing.")
     else:
         print(f"  {len(drata_payload)} records transformed.")
+    if args.sandbox:
+        drata_payload = apply_sandbox_overrides(drata_payload)
+        print(f"  [SANDBOX] personnelId domain rewritten to @sandbox.nationwide.com.")
 
     # Step 6: write output files
     write_json(merged, raw_path)
