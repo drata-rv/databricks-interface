@@ -45,6 +45,10 @@ load_env()
 # ---------------------------------------------------------------------------
 STRIP_PREFIXES = ("__",)
 _MAX_RETRIES = 3
+
+# Devices whose Netbios_Name0 does not start with one of these prefixes are dropped
+# before the merge. Add new prefixes here as needed (case-insensitive).
+DEVICE_NAME_PREFIXES = ('NW', 'GI')
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
 _SW_BATCH_SIZE = 200
 
@@ -561,6 +565,18 @@ def main() -> None:
     )
     if not devices:
         print("  [FAIL] No devices matched the user set -- verify Netbios_Name0 alignment between users and devices tables")
+        sys.exit(1)
+
+    before_prefix = len(devices)
+    devices = [
+        d for d in devices
+        if (d.get('Netbios_Name0') or d.get('Name0') or '').upper().startswith(DEVICE_NAME_PREFIXES)
+    ]
+    dropped_prefix = before_prefix - len(devices)
+    if dropped_prefix:
+        print(f"  [FILTER] {dropped_prefix} device(s) dropped -- name does not start with {DEVICE_NAME_PREFIXES}.")
+    if not devices:
+        print("  [FAIL] No devices remain after prefix filter -- check DEVICE_NAME_PREFIXES")
         sys.exit(1)
 
     resource_ids = [rid for rid in (get_resource_id(r) for r in devices) if rid is not None]
