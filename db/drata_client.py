@@ -67,6 +67,11 @@ class DrataClient:
     ) -> bool:
         import requests
 
+        pid    = record.get('personnelId', '(none)')
+        alias  = record.get('alias', '(none)')
+        ext_id = record.get('externalId', '(none)')
+        print(f"  [{index}/{total}] personnelId={pid}  alias={alias}  externalId={ext_id}")
+
         last_err = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -74,27 +79,28 @@ class DrataClient:
 
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get('Retry-After', _RETRY_DELAYS[min(attempt - 1, 1)]))
-                    print(f"  [RATE LIMIT] record {index}/{total}, retrying in {retry_after}s ...")
+                    print(f"    [RATE LIMIT] retrying in {retry_after}s ...")
                     time.sleep(retry_after)
                     continue
 
                 if 400 <= resp.status_code < 500:
-                    msg = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                    print(f"  [FAIL] record {index}/{total}: {msg}")
-                    errors.append({'index': index, 'error': msg})
+                    msg = f"HTTP {resp.status_code}: {resp.text}"
+                    print(f"    [FAIL] {msg}")
+                    errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': msg})
                     return False
 
                 resp.raise_for_status()
+                print(f"    [OK] HTTP {resp.status_code}")
                 return True
 
             except Exception as e:
                 last_err = e
                 if attempt < _MAX_RETRIES:
                     wait = _RETRY_DELAYS[attempt - 1]
-                    print(f"  [RETRY {attempt}/{_MAX_RETRIES}] record {index}/{total} failed, retrying in {wait}s ...")
+                    print(f"    [RETRY {attempt}/{_MAX_RETRIES}] {e} -- retrying in {wait}s ...")
                     time.sleep(wait)
 
         msg = str(last_err)
-        print(f"  [FAIL] record {index}/{total} failed after {_MAX_RETRIES} attempts: {msg}")
-        errors.append({'index': index, 'error': msg})
+        print(f"    [FAIL] all {_MAX_RETRIES} attempts exhausted: {msg}")
+        errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': msg})
         return False
