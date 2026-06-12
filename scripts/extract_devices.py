@@ -516,6 +516,10 @@ def main() -> None:
             sys.exit(1)
         all_users = pull_table(test_client, users_table, args.warehouse_test, "users", timeout=args.timeout)
 
+    if args.limit and len(all_users) > args.limit:
+        print(f"  Limiting to {args.limit} users (of {len(all_users)} total).")
+        all_users = all_users[:args.limit]
+
     # Step 1b: validate each user against Drata personnel status
     if api_key:
         from db.drata_client import DrataClient
@@ -542,10 +546,6 @@ def main() -> None:
         print(f"  Personnel filter: {len(all_users)} active / {skipped} excluded (former, not found, or no UPN).")
     else:
         print("  [WARN] DRATA_API_KEY not set -- personnel filter skipped, all users will be processed.")
-
-    if args.limit and len(all_users) > args.limit:
-        print(f"  Limiting to {args.limit} users (of {len(all_users)} total).")
-        all_users = all_users[:args.limit]
 
     if not all_users:
         print("  [FAIL] No users loaded -- check users table or --local-users file")
