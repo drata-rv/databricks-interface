@@ -51,6 +51,8 @@ _MAX_RETRIES = 3
 DEVICE_NAME_PREFIXES = ('NW', 'GI')
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
 _SW_BATCH_SIZE = 200
+_PERSONNEL_CHECK_WORKERS = 20
+_PIPELINE_CHUNK_SIZE = 500
 
 
 def is_internal(col: str) -> bool:
@@ -429,6 +431,15 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Print full resolved config and env var sources before running.",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        default=False,
+        help=(
+            "Process all users -- bypasses --limit and runs the full dataset using the "
+            "chunked pipeline. Intended for production sync of 25,000+ users."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -472,6 +483,8 @@ def main() -> None:
         print(f"Users source     : LOCAL FILE ({_LOCAL_USERS_FILE})")
     if args.test_mode:
         print(f"Mode             : TEST MODE (all 5 monitoring fields forced passing)")
+    if args.full:
+        print(f"Mode             : FULL SYNC (all users, --limit bypassed)")
     if args.dry_run:
         print(f"Mode             : DRY RUN (Drata push skipped)")
 
@@ -518,31 +531,41 @@ def main() -> None:
             sys.exit(1)
         all_users = pull_table(test_client, users_table, args.warehouse_test, "users", timeout=args.timeout)
 
-    if args.limit and len(all_users) > args.limit:
+    if args.full:
+        print(f"  Full sync: processing all {len(all_users)} users.")
+    elif args.limit and len(all_users) > args.limit:
         print(f"  Limiting to {args.limit} users (of {len(all_users)} total).")
         all_users = all_users[:args.limit]
 
-    # Step 1b: validate each user against Drata personnel status
+    # Step 1b: validate each user against Drata personnel status (parallel)
     if api_key:
         from db.drata_client import DrataClient
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
         drata_pre = DrataClient(api_key=api_key, connection_id=connection_id)
         upn_key = 'User_Princiipal_Name0'  # double-i typo in source
         _active = {'CURRENT_EMPLOYEE', 'CURRENT_CONTRACTOR'}
         before = len(all_users)
-        filtered = []
-        print(f"Checking {len(all_users)} user(s) against Drata personnel status ...")
-        for i, u in enumerate(all_users, 1):
+        sandbox_flag = args.sandbox
+
+        def _check_one(u):
             email = (u.get(upn_key) or u.get('User_Principal_Name0') or '').lower()
             if not email or '@' not in email:
-                continue
-            lookup_email = email
-            if args.sandbox and '@nationwide.com' in email:
-                lookup_email = email.replace('@nationwide.com', '@sandbox.nationwide.com')
-            status = drata_pre.get_person_status(lookup_email)
-            if status in _active:
-                filtered.append(u)
-            if i % 50 == 0:
-                print(f"  ... {i}/{before} checked, {len(filtered)} active so far ...")
+                return u, None
+            lookup = email
+            if sandbox_flag and '@nationwide.com' in email:
+                lookup = email.replace('@nationwide.com', '@sandbox.nationwide.com')
+            return u, drata_pre.get_person_status(lookup)
+
+        filtered = []
+        print(f"Checking {before} user(s) against Drata personnel status ({_PERSONNEL_CHECK_WORKERS} workers) ...")
+        with ThreadPoolExecutor(max_workers=_PERSONNEL_CHECK_WORKERS) as pool:
+            futures = {pool.submit(_check_one, u): u for u in all_users}
+            for i, fut in enumerate(_as_completed(futures), 1):
+                u, status = fut.result()
+                if status in _active:
+                    filtered.append(u)
+                if i % 500 == 0:
+                    print(f"  ... {i}/{before} checked, {len(filtered)} active ...")
         all_users = filtered
         skipped = before - len(all_users)
         print(f"  Personnel filter: {len(all_users)} active / {skipped} excluded (former, not found, or no UPN).")
@@ -550,121 +573,139 @@ def main() -> None:
         print("  [WARN] DRATA_API_KEY not set -- personnel filter skipped, all users will be processed.")
 
     if not all_users:
-        print("  [FAIL] No users loaded -- check users table or --local-users file")
+        print("  [FAIL] No users remain after personnel filter -- check DRATA_API_KEY or user data")
         sys.exit(1)
 
-    user_netbios_names = [u.get("Netbios_Name0") or u.get("netbios_name0") for u in all_users]
-    user_netbios_names = [n for n in user_netbios_names if n]
+    # Steps 2-5: process in chunks to bound memory and Databricks query scope
+    chunks = [all_users[i:i + _PIPELINE_CHUNK_SIZE]
+              for i in range(0, len(all_users), _PIPELINE_CHUNK_SIZE)]
+    print(f"\n{len(all_users)} user(s) in {len(chunks)} chunk(s) of up to {_PIPELINE_CHUNK_SIZE}.")
 
-    # Step 2: pull devices scoped to the user set (no LIMIT -- scope comes from users)
-    print(f"  Pulling devices scoped to {len(user_netbios_names)} user machine names ...")
-    devices = pull_table(
-        prod_client, args.devices, args.warehouse_prod, "devices",
-        filter_sql=_names_filter(user_netbios_names),
-        timeout=args.timeout,
-    )
-    if not devices:
-        print("  [FAIL] No devices matched the user set -- verify Netbios_Name0 alignment between users and devices tables")
-        sys.exit(1)
-
-    before_prefix = len(devices)
-    devices = [
-        d for d in devices
-        if (d.get('Netbios_Name0') or d.get('Name0') or '').upper().startswith(DEVICE_NAME_PREFIXES)
-    ]
-    dropped_prefix = before_prefix - len(devices)
-    if dropped_prefix:
-        print(f"  [FILTER] {dropped_prefix} device(s) dropped -- name does not start with {DEVICE_NAME_PREFIXES}.")
-    if not devices:
-        print("  [FAIL] No devices remain after prefix filter -- check DEVICE_NAME_PREFIXES")
-        sys.exit(1)
-
-    resource_ids = [rid for rid in (get_resource_id(r) for r in devices) if rid is not None]
-    filter_map = {
-        'resource_id': _ids_filter(resource_ids),
-        'netbios_name': _names_filter(user_netbios_names),
-    }
-
-    # Step 3: pull secondary tables via registry
     clients = {'prod': prod_client, 'test': test_client}
-    pulled: Dict[str, Any] = {}
+    all_merged: List[Dict[str, Any]] = []
+    all_drata: List[Dict[str, Any]] = []
 
-    for spec in TABLE_REGISTRY:
-        table_path = os.getenv(spec.env_var, '').strip()
-        if not table_path:
-            if spec.required:
-                print(f"  [FAIL] {spec.env_var} is required but not set")
+    for chunk_num, chunk in enumerate(chunks, 1):
+        if len(chunks) > 1:
+            print(f"\n--- Chunk {chunk_num}/{len(chunks)} ({len(chunk)} users) ---")
+
+        chunk_names = [u.get("Netbios_Name0") or u.get("netbios_name0") for u in chunk]
+        chunk_names = [n for n in chunk_names if n]
+
+        # Step 2: pull devices scoped to this chunk
+        print(f"  Pulling devices scoped to {len(chunk_names)} user machine names ...")
+        devices = pull_table(
+            prod_client, args.devices, args.warehouse_prod, "devices",
+            filter_sql=_names_filter(chunk_names),
+            timeout=args.timeout,
+        )
+        if not devices:
+            if chunk_num == 1 and len(chunks) == 1:
+                print("  [FAIL] No devices matched the user set -- verify Netbios_Name0 alignment between users and devices tables")
                 sys.exit(1)
-            pulled[spec.label] = None
+            print(f"  [WARN] Chunk {chunk_num}: no devices matched -- skipping.")
             continue
-        wh = args.warehouse_test if spec.client_key == 'test' else args.warehouse_prod
-        if spec.batched:
-            data = pull_table_batched(
-                clients[spec.client_key], table_path, wh, spec.label,
-                ids=resource_ids, timeout=args.timeout,
-            )
-        else:
-            data = pull_table(
-                clients[spec.client_key], table_path, wh, spec.label,
-                filter_sql=filter_map[spec.filter_type], timeout=args.timeout,
-            )
-        pulled[spec.label] = data
-        if not data:
-            print(f"  [WARN] {spec.label} returned 0 rows")
 
-    # Step 4: merge (user-centric inner join)
-    print("\nMerging (user-centric) ...")
-    merged, dropped = merge(
-        devices,
-        pulled['windows_update'],
-        pulled['installed_software'],
-        all_users,
-        bitlocker=pulled.get('bitlocker'),
-        screensaver=pulled.get('screensaver'),
-        services=pulled.get('services'),
-        network_adapter=pulled.get('network_adapter'),
-    )
-    print(f"  {len(merged)} records assembled.")
-    if dropped:
-        print(f"  [INFO] {dropped} device(s) had no matching user and were excluded.")
+        before_prefix = len(devices)
+        devices = [
+            d for d in devices
+            if (d.get('Netbios_Name0') or d.get('Name0') or '').upper().startswith(DEVICE_NAME_PREFIXES)
+        ]
+        dropped_prefix = before_prefix - len(devices)
+        if dropped_prefix:
+            print(f"  [FILTER] {dropped_prefix} device(s) dropped -- name does not start with {DEVICE_NAME_PREFIXES}.")
+        if not devices:
+            print(f"  [WARN] Chunk {chunk_num}: no devices after prefix filter -- skipping.")
+            continue
 
-    # Step 5: transform to Drata MDM format
-    print("Transforming to Drata MDM format ...")
-    drata_payload = transform_all(merged)
+        resource_ids = [rid for rid in (get_resource_id(r) for r in devices) if rid is not None]
+        filter_map = {
+            'resource_id': _ids_filter(resource_ids),
+            'netbios_name': _names_filter(chunk_names),
+        }
+
+        # Step 3: pull secondary tables for this chunk
+        pulled: Dict[str, Any] = {}
+        for spec in TABLE_REGISTRY:
+            table_path = os.getenv(spec.env_var, '').strip()
+            if not table_path:
+                if spec.required:
+                    print(f"  [FAIL] {spec.env_var} is required but not set")
+                    sys.exit(1)
+                pulled[spec.label] = None
+                continue
+            wh = args.warehouse_test if spec.client_key == 'test' else args.warehouse_prod
+            if spec.batched:
+                data = pull_table_batched(
+                    clients[spec.client_key], table_path, wh, spec.label,
+                    ids=resource_ids, timeout=args.timeout,
+                )
+            else:
+                data = pull_table(
+                    clients[spec.client_key], table_path, wh, spec.label,
+                    filter_sql=filter_map[spec.filter_type], timeout=args.timeout,
+                )
+            pulled[spec.label] = data
+            if not data:
+                print(f"  [WARN] {spec.label} returned 0 rows")
+
+        # Step 4: merge (user-centric inner join)
+        print(f"  Merging (user-centric) ...")
+        merged_chunk, dropped = merge(
+            devices,
+            pulled['windows_update'],
+            pulled['installed_software'],
+            chunk,
+            bitlocker=pulled.get('bitlocker'),
+            screensaver=pulled.get('screensaver'),
+            services=pulled.get('services'),
+            network_adapter=pulled.get('network_adapter'),
+        )
+        print(f"  {len(merged_chunk)} records assembled.")
+        if dropped:
+            print(f"  [INFO] {dropped} device(s) had no matching user in this chunk.")
+
+        # Step 5: transform to Drata MDM format
+        drata_chunk = transform_all(merged_chunk)
+        if args.test_mode:
+            drata_chunk = apply_test_overrides(drata_chunk)
+        if args.sandbox:
+            drata_chunk = apply_sandbox_overrides(drata_chunk)
+
+        all_merged.extend(merged_chunk)
+        all_drata.extend(drata_chunk)
+
     if args.test_mode:
-        drata_payload = apply_test_overrides(drata_payload)
-        print(f"  [TEST MODE] {len(drata_payload)} records with all 5 monitoring fields forced to passing.")
+        print(f"\n  [TEST MODE] {len(all_drata)} records with all 5 monitoring fields forced to passing.")
     else:
-        print(f"  {len(drata_payload)} records transformed.")
+        print(f"\n  {len(all_drata)} total record(s) transformed.")
     if args.sandbox:
-        drata_payload = apply_sandbox_overrides(drata_payload)
         print(f"  [SANDBOX] personnelId domain rewritten to @sandbox.nationwide.com.")
 
     # Step 6: write output files
-    write_json(merged, raw_path)
+    write_json(all_merged, raw_path)
     print(f"\n[OK] Raw merged JSON  : {raw_path}")
 
-    write_json(drata_payload, drata_path)
+    write_json(all_drata, drata_path)
     print(f"[OK] Drata MDM JSON   : {drata_path}")
 
     # Step 7: push to Drata API
     # Filter records with no usable personnelId before pushing -- sending null to Drata
     # guarantees a 400; skip locally and log so the run doesn't burn retries on bad data.
-    valid_payload = [r for r in drata_payload if r.get('personnelId')]
-    no_pid = len(drata_payload) - len(valid_payload)
+    valid_payload = [r for r in all_drata if r.get('personnelId')]
+    no_pid = len(all_drata) - len(valid_payload)
     if no_pid:
         print(f"  [WARN] {no_pid} record(s) skipped -- personnelId is null (UPN empty in source).")
-    drata_payload = valid_payload
 
     if args.dry_run:
-        print(f"\n[DRY RUN] Would push {len(drata_payload)} records to Drata (skipped).\n")
+        print(f"\n[DRY RUN] Would push {len(valid_payload)} records to Drata (skipped).\n")
     elif not api_key or not connection_id:
         print("\n[SKIP] DRATA_API_KEY or DRATA_CONNECTION_ID not set -- skipping push.\n")
     else:
         from db.drata_client import DrataClient
-        print("\nPushing to Drata ...")
+        print(f"\nPushing {len(valid_payload)} records to Drata (parallel) ...")
         drata = DrataClient(api_key=api_key, connection_id=connection_id)
-        result = drata.push_batch(drata_payload)
+        result = drata.push_batch_parallel(valid_payload)
         if result['errors']:
             print(f"  [WARN] {len(result['errors'])} record(s) failed -- review output above.")
         else:

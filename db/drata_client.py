@@ -13,11 +13,13 @@ Endpoint:
   One device object per request.
 """
 
+import threading
 import time
 from typing import Any, Dict, List
 
 _MAX_RETRIES = 3
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
+_PUSH_WORKERS = 10
 
 _BASE_URL = "https://public-api.drata.com"
 _PUSH_PATH = "/public/v2/custom-connections/{connection_id}/devices"
@@ -30,7 +32,13 @@ class DrataClient:
         self._api_key = api_key
         self._connection_id = connection_id
         self._timeout = timeout
-        self._session = self._build_session()
+        self._local = threading.local()
+
+    @property
+    def _session(self) -> Any:
+        if not hasattr(self._local, 'session'):
+            self._local.session = self._build_session()
+        return self._local.session
 
     def _build_session(self) -> Any:
         import requests
@@ -56,6 +64,38 @@ class DrataClient:
             if success:
                 pushed += 1
         return {'total': len(records), 'pushed': pushed, 'errors': errors}
+
+    def push_batch_parallel(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Push all records to Drata concurrently using a thread pool.
+
+        Returns a summary dict: {'total': int, 'pushed': int, 'errors': list}.
+        errors is a list of {'index': int, 'error': str} for failed records.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        url = f"{_BASE_URL}{_PUSH_PATH.format(connection_id=self._connection_id)}"
+        errors: List[Dict[str, Any]] = []
+        lock = threading.Lock()
+        pushed_count = 0
+        total = len(records)
+
+        def _push(item: tuple) -> tuple:
+            idx, record = item
+            local_errors: List[Dict[str, Any]] = []
+            ok = self._push_one_record(url, record, idx + 1, total, local_errors)
+            return ok, local_errors
+
+        with ThreadPoolExecutor(max_workers=_PUSH_WORKERS) as pool:
+            futures = {pool.submit(_push, (i, r)): i for i, r in enumerate(records)}
+            for fut in as_completed(futures):
+                ok, local_errors = fut.result()
+                with lock:
+                    if ok:
+                        pushed_count += 1
+                    errors.extend(local_errors)
+
+        return {'total': total, 'pushed': pushed_count, 'errors': errors}
 
     def _push_one_record(
         self,
