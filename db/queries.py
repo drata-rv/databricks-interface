@@ -86,24 +86,29 @@ def run_sql(
 ) -> Dict[str, Any]:
     """Execute *statement* on *warehouse_id* and return rows + column names.
 
-    Returns a dict with keys:
-      - columns: list of column names
-      - rows:    list of row lists (strings; Databricks returns everything as str)
-      - state:   final StatementState value
+    Uses EXTERNAL_LINKS disposition with CSV format. Databricks writes each
+    result chunk to cloud storage and returns pre-signed URLs; this process
+    downloads them with no per-response byte limit (replaces INLINE which was
+    capped at 25 MB and failed on large tables such as installed_software).
 
-    timeout_seconds is the total client-side budget and covers cold warehouse
-    start (1-3 min serverless, 5-10 min classic). The server-side wait is capped
-    at 50s per API limits; remaining time is used for client polling.
+    Returns:
+        {"columns": [str, ...], "rows": [[str, ...], ...], "state": "SUCCEEDED"}
+
+    timeout_seconds covers cold warehouse start (1-3 min serverless). The
+    server-side wait is capped at 50s per API limits; remaining time polls.
     """
-    from databricks.sdk.service.sql import Disposition
+    import csv
+    import io
+    import requests as _req
+    from databricks.sdk.service.sql import Disposition, Format
 
-    # Server-side wait is capped at 50s by the Databricks API
     server_wait = min(timeout_seconds, 50)
     request_kwargs: Dict[str, Any] = dict(
         statement=statement,
         warehouse_id=warehouse_id,
         wait_timeout=f"{server_wait}s",
-        disposition=Disposition.INLINE,
+        disposition=Disposition.EXTERNAL_LINKS,
+        format=Format.CSV,
     )
     if catalog:
         request_kwargs["catalog"] = catalog
@@ -119,7 +124,6 @@ def run_sql(
         StatementState.RUNNING,
     ):
         if time.monotonic() > deadline:
-            # Cancel the in-flight statement so it does not keep consuming warehouse compute
             try:
                 client.statement_execution.cancel_execution(
                     statement_id=response.statement_id
@@ -157,15 +161,29 @@ def run_sql(
         else []
     )
 
-    # Collect all inline result chunks -- the API caps each chunk at 16 MB
-    all_rows: List[List[Any]] = list(response.result.data_array or []) if response.result else []
+    def _fetch_chunk(url: str) -> List[List[str]]:
+        resp = _req.get(url, timeout=300)
+        resp.raise_for_status()
+        rows = list(csv.reader(io.StringIO(resp.text)))
+        # CSV chunks have no header row; strip one defensively if present.
+        if rows and rows[0] == columns:
+            rows = rows[1:]
+        return rows
+
+    all_rows: List[List[Any]] = []
+    links = list(response.result.external_links or []) if response.result else []
     next_chunk = response.result.next_chunk_index if response.result else None
+
+    for link in links:
+        all_rows.extend(_fetch_chunk(link.external_link))
+
     while next_chunk is not None:
         chunk = client.statement_execution.get_statement_result_chunk_n(
             statement_id=response.statement_id,
             chunk_index=next_chunk,
         )
-        all_rows.extend(chunk.data_array or [])
+        for link in (chunk.external_links or []):
+            all_rows.extend(_fetch_chunk(link.external_link))
         next_chunk = chunk.next_chunk_index
 
     return {"columns": columns, "rows": all_rows, "state": state.value}
