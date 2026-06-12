@@ -82,12 +82,11 @@ def _platform_name(os_string: Optional[str]) -> str:
         return 'MACOS'
     if 'linux' in s:
         return 'LINUX'
-    if 'ios' in s or 'iphone' in s or 'ipad' in s:
-        return 'IOS'
     if 'android' in s:
         return 'ANDROID'
-    # Drata may reject UNKNOWN -- if this surfaces in output, check Operating_System_Name_and0
-    return 'UNKNOWN'
+    # iOS/unknown: SCCM is Windows-only so these should not appear in practice;
+    # fall back to WINDOWS as the closest valid enum value for unrecognized SCCM OS strings.
+    return 'WINDOWS'
 
 
 def _build_app_list(software: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -301,7 +300,7 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
         'model': device.get('CPUType0'),
         'macAddress': features['mac_address'],
         'platformName': _platform_name(device.get('Operating_System_Name_and0')),
-        'platformVersion': device.get('Build01') or device.get('BuildExt'),
+        'platformVersion': device.get('Build01') or device.get('BuildExt') or '',
         'antivirusEnabled': features['av_enabled'],
         'antivirusExplanation': {'antivirusApps': features['av_apps']},
         'appList': features['app_list'],
