@@ -28,7 +28,7 @@ _BASE_URL = "https://public-api.drata.com"
 
 # Endpoint for the Custom Device Connection batch push.
 # Verify this path from the Drata OpenAPI spec before first use.
-_PUSH_PATH = "/v2/devices/custom-connection"
+_PUSH_PATH = "/v2/devices/custom-connections"
 
 
 class DrataClient:
