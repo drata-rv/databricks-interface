@@ -267,6 +267,8 @@ def merge(
         device = device_index[netbios]
         matched_netbios.add(netbios)
         rid = get_resource_id(device)
+        if rid is None:
+            print(f"  [WARN] merge: device {netbios!r} has no parseable resource_id -- software/WU data will be empty.")
         user_fields = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
         device_fields = {k: v for k, v in device.items() if k not in ("resource_id", "ResourceID", "ResourceType")}
         output.append({
@@ -681,6 +683,12 @@ def main() -> None:
         all_merged.extend(merged_chunk)
         all_drata.extend(drata_chunk)
 
+    if not all_merged:
+        print("  [FAIL] No records produced across all chunks.")
+        print("         Possible causes: Netbios_Name0 mismatch between users and devices tables,")
+        print("         all users excluded by personnel filter, or all devices dropped by prefix filter.")
+        sys.exit(1)
+
     if args.test_mode:
         print(f"\n  [TEST MODE] {len(all_drata)} records with all 5 monitoring fields forced to passing.")
     else:
@@ -713,7 +721,12 @@ def main() -> None:
         drata = DrataClient(api_key=api_key, connection_id=connection_id)
         result = drata.push_batch_parallel(valid_payload)
         if result['errors']:
-            print(f"  [WARN] {len(result['errors'])} record(s) failed -- review output above.")
+            print(f"  [WARN] {len(result['errors'])} record(s) failed.")
+            print("  Failed records:")
+            for err in result['errors'][:20]:
+                print(f"    personnelId={err.get('personnelId')}  alias={err.get('alias')}  error={err.get('error')}")
+            if len(result['errors']) > 20:
+                print(f"    ... and {len(result['errors']) - 20} more (see {drata_path} for full payload)")
         else:
             print(f"  [OK] Pushed {result['pushed']}/{result['total']} records.\n")
 
