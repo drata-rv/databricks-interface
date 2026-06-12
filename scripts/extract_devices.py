@@ -84,20 +84,53 @@ def get_resource_id(record: Dict[str, Any]) -> Optional[int]:
     return None
 
 
-def pull_table(client: Any, table: str, warehouse_id: str, limit: int, label: str) -> List[Dict[str, Any]]:
-    """Pull a table and return cleaned records. Exits on failure."""
+def _ids_filter(ids: List[int], column: str = "resource_id") -> str:
+    """Build a SQL IN filter for integer IDs. Returns '1=0' if the list is empty."""
+    if not ids:
+        return "1=0"
+    return f"{column} IN ({', '.join(str(int(i)) for i in ids)})"
+
+
+def _names_filter(names: List[str], column: str = "Netbios_Name0") -> str:
+    """Build a SQL IN filter for string names with single-quote escaping."""
+    if not names:
+        return "1=0"
+    escaped = ", ".join("'" + n.replace("'", "''") + "'" for n in names)
+    return f"{column} IN ({escaped})"
+
+
+def pull_table(
+    client: Any,
+    table: str,
+    warehouse_id: str,
+    label: str,
+    limit: Optional[int] = None,
+    filter_sql: Optional[str] = None,
+    timeout: int = 300,
+) -> List[Dict[str, Any]]:
+    """Pull a table and return cleaned records. Exits on failure.
+
+    Secondary tables (wu, software, users) are queried with an IN-clause filter
+    scoped to the device set -- no LIMIT applied to those pulls.
+    """
+    parts = [f"SELECT * FROM {table}"]
+    if filter_sql:
+        parts.append(f"WHERE {filter_sql}")
+    if limit is not None:
+        parts.append(f"LIMIT {limit}")
+    statement = " ".join(parts)
     print(f"  Pulling {label} ({table}) ...")
     try:
         result = queries.run_sql(
             client,
-            statement=f"SELECT * FROM {table} LIMIT {limit}",
+            statement=statement,
             warehouse_id=warehouse_id,
+            timeout_seconds=timeout,
         )
         records = rows_to_records(result["columns"], result["rows"])
         print(f"  {len(records)} rows retrieved.")
         return [clean(r) for r in records]
     except Exception as e:
-        # Extract the meaningful part of the error before the SDK config dump
         raw = str(e)
         short = raw.split(". Config:")[0].split(". Env:")[0].strip()
         print(f"  [FAIL] {label}")
@@ -244,7 +277,13 @@ def parse_args() -> argparse.Namespace:
         "--limit",
         type=int,
         default=int(os.getenv("DATABRICKS_LIMIT", "1000")),
-        help="Max rows to pull per table (default: 1000).",
+        help="Max rows to pull from the devices table (default: 1000). Secondary tables pull all matching rows.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=int(os.getenv("DATABRICKS_QUERY_TIMEOUT", "300")),
+        help="Per-query timeout in seconds, covering cold warehouse start (default: 300). Uses DATABRICKS_QUERY_TIMEOUT.",
     )
     parser.add_argument(
         "--output-raw",
@@ -301,7 +340,8 @@ def main() -> None:
     print(f"Test workspace   : {args.host_test}")
     print(f"Warehouse (prod) : {args.warehouse_prod}")
     print(f"Warehouse (test) : {args.warehouse_test}")
-    print(f"Limit            : {args.limit} rows per table")
+    print(f"Limit (devices)  : {args.limit} rows")
+    print(f"Query timeout    : {args.timeout}s per table")
     print(f"Output (raw)     : {raw_path}")
     print(f"Output (drata)   : {drata_path}")
 
@@ -318,15 +358,36 @@ def main() -> None:
         print(f"DATABRICKS_TABLE_WINDOWS_UPDATE  : {os.getenv('DATABRICKS_TABLE_WINDOWS_UPDATE', '(not set)')}")
         print(f"DATABRICKS_TABLE_INSTALLED_SOFTWARE: {os.getenv('DATABRICKS_TABLE_INSTALLED_SOFTWARE', '(not set)')}")
         print(f"DATABRICKS_TABLE_USERS           : {os.getenv('DATABRICKS_TABLE_USERS', '(not set)')}")
+        print(f"DATABRICKS_QUERY_TIMEOUT         : {os.getenv('DATABRICKS_QUERY_TIMEOUT', '(not set, using 300)')}")
         print(f"~/.databrickscfg exists          : {databrickscfg.exists()}")
         print(f"-- END DEBUG --\n")
     else:
         print()
 
-    devices = pull_table(prod_client, args.devices, args.warehouse_prod, args.limit, "devices")
-    wu = pull_table(test_client, args.wu, args.warehouse_test, args.limit, "windows_update")
-    software = pull_table(test_client, args.software, args.warehouse_test, args.limit, "installed_software")
-    users = pull_table(test_client, args.users, args.warehouse_test, args.limit, "users")
+    # Step 1: devices sets the scope for all downstream table pulls
+    devices = pull_table(prod_client, args.devices, args.warehouse_prod, "devices",
+                         limit=args.limit, timeout=args.timeout)
+    if not devices:
+        print("  [FAIL] devices returned 0 rows -- verify table path and warehouse permissions")
+        sys.exit(1)
+
+    # Build IN-clause filters scoped to the pulled device set
+    resource_ids = [rid for rid in (get_resource_id(r) for r in devices) if rid is not None]
+    netbios_names = [n for n in (r.get('Netbios_Name0') or r.get('Name0') for r in devices) if n]
+    rid_filter = _ids_filter(resource_ids)
+    name_filter = _names_filter(netbios_names)
+
+    # Step 2: pull secondary tables scoped to the device set (no row cap)
+    wu = pull_table(test_client, args.wu, args.warehouse_test, "windows_update",
+                    filter_sql=rid_filter, timeout=args.timeout)
+    software = pull_table(test_client, args.software, args.warehouse_test, "installed_software",
+                          filter_sql=rid_filter, timeout=args.timeout)
+    users = pull_table(test_client, args.users, args.warehouse_test, "users",
+                       filter_sql=name_filter, timeout=args.timeout)
+
+    for label, result in [("windows_update", wu), ("installed_software", software), ("users", users)]:
+        if not result:
+            print(f"  [WARN] {label} returned 0 rows")
 
     print("\nMerging on resource_id / Netbios_Name0 ...")
     merged = merge(devices, wu, software, users)
