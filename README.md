@@ -90,6 +90,14 @@ The `.env.example` file is pre-filled with all known workspace URLs, warehouse I
 | `DATABRICKS_LIMIT` | No | Max device rows to pull per run (default: 1000) |
 | `DATABRICKS_QUERY_TIMEOUT` | No | Per-query timeout in seconds, covers cold warehouse start (default: 300) |
 | `DATABRICKS_TOKEN` | No | Shared token fallback used by both workspaces if workspace-specific vars are not set |
+| `DRATA_API_KEY` | No* | Drata public API Bearer token |
+| `DRATA_CONNECTION_ID` | No* | UUID of the Custom Device Connection in Drata |
+| `DATABRICKS_TABLE_BITLOCKER` | No | Path to BitLocker details table -- enables `encryptionEnabled` |
+| `DATABRICKS_TABLE_SCREENSAVER` | No | Path to screensaver settings table -- enables `screenLockEnabled` |
+| `DATABRICKS_TABLE_SERVICES` | No | Path to Windows services table -- enables `firewallEnabled`, `windowsServices` |
+| `DATABRICKS_TABLE_NETWORK_ADAPTER` | No | Path to network adapter config table -- enables `macAddress` |
+
+*`DRATA_API_KEY` and `DRATA_CONNECTION_ID` are required for the Drata push step. If either is unset, the pipeline writes JSON output but skips the push (equivalent to `--dry-run`).
 
 *If both workspaces share a token, set only `DATABRICKS_TOKEN`.
 
@@ -124,10 +132,26 @@ Two output files are written per run:
 - `output/devices_<timestamp>_raw.json` -- merged SCCM data exactly as pulled
 - `output/devices_<timestamp>_drata.json` -- transformed into Drata Custom Device Connection format
 
+Use `--dry-run` to run the full pipeline and write output files without pushing to Drata:
+
+```bash
+python scripts/extract_devices.py --dry-run
+```
+
 Use `--debug` to print the full resolved environment before running:
 
 ```bash
 python scripts/extract_devices.py --debug
+```
+
+### Step 3: Push to Drata
+
+Set `DRATA_API_KEY` and `DRATA_CONNECTION_ID` in `.env`, then run without `--dry-run`. The script pushes all records automatically after writing the output files.
+
+To push a small batch first and verify records appear in Drata before a full run:
+
+```bash
+python scripts/extract_devices.py --limit 5
 ```
 
 ---
@@ -136,12 +160,21 @@ python scripts/extract_devices.py --debug
 
 1. Pulls the devices table from the prod workspace (up to `DATABRICKS_LIMIT` rows)
 2. Derives `resource_id` and `Netbios_Name0` from that device set
-3. Queries windows_update, installed_software, and users from the test workspace using IN-clause filters scoped to those device IDs -- no row cap on secondary tables
-4. Left-joins all tables onto devices: windows_update and installed_software join on `resource_id`, users joins on `Netbios_Name0`
-5. Transforms each merged record into the Drata Custom Device Connection JSON shape
-6. Writes both the raw merged record and the Drata payload per run
+3. Queries secondary tables from the test workspace using IN-clause filters scoped to those device IDs -- no row cap
+4. Merges using users as the anchor (inner join): only devices with a matched user record are included; unmatched devices are counted and logged
+5. Extracts the 5 Drata monitoring signals (antivirus, auto-update, password manager, encryption, screen lock) from the merged data
+6. Formats each merged record into the Drata Custom Device Connection JSON shape
+7. Writes both the raw merged record and the Drata payload per run
+8. Pushes to the Drata API if `DRATA_API_KEY` and `DRATA_CONNECTION_ID` are set
 
 The `output/` directory is git-ignored. Each run produces a new timestamped pair of files.
+
+### Adding a new SCCM table
+
+1. Set the matching `DATABRICKS_TABLE_*` env var in `.env`
+2. Uncomment the corresponding `TableSpec` line in `TABLE_REGISTRY` in [`scripts/extract_devices.py`](scripts/extract_devices.py)
+
+No other code changes are needed. The new table is automatically pulled with an IN-clause filter and passed to the merge and feature-extraction stages.
 
 ---
 
@@ -168,10 +201,11 @@ Each step prints `[OK]`, `[FAIL]`, or `[SKIP]`. Steps are independent -- a failu
 db/
   auth.py            -- WorkspaceClient factory; reads credentials from environment
   queries.py         -- Catalog browsing, SQL execution, result helpers
-  transform.py       -- Maps merged SCCM records to Drata Custom Device Connection format
+  transform.py       -- Feature extraction (extract_features) and Drata format assembly (format_for_drata)
+  drata_client.py    -- Drata Custom Device Connection API client
 scripts/
   test_connection.py -- Connectivity probe and single-table export
-  extract_devices.py -- Four-table ETL: pull, merge, transform, write
+  extract_devices.py -- ETL: pull via registry, user-centric merge, transform, write, push
 output/              -- Extracted JSON files (git-ignored)
 .env.example         -- Credential and config template (pre-filled)
 requirements.txt

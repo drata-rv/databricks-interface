@@ -1,6 +1,10 @@
 """
 Transform merged SCCM device records into the Drata Custom MDM JSON structure.
 
+Pipeline stages:
+  extract_features(merged) -- triangulate all boolean signals from raw SCCM data
+  format_for_drata(features) -- map extracted features to the Drata JSON shape
+
 Fields populated from current data sources:
   alias, externalId, serialNumber, model, platformName, platformVersion,
   appList, antivirusEnabled, antivirusExplanation,
@@ -10,12 +14,12 @@ Fields populated from current data sources:
 Fields populated from the user identity table (joined on Netbios_Name0):
   personnelId          -- User_Princiipal_Name0 (source column has the double-i typo)
 
-Fields set to null -- require additional SCCM tables or data sources:
-  firewallEnabled      -- needs gs_firewall or windows services table
-  encryptionEnabled    -- needs BitLocker / gs_encryptablevolume table
-  screenLockEnabled    -- needs gs_screensaver or policy table
-  windowsServices      -- needs gs_services table
-  macAddress           -- not present in current tables
+Fields set to null -- require additional SCCM tables (uncomment in TABLE_REGISTRY to enable):
+  firewallEnabled      -- needs t_sccm_gs_services (mpssvc / Windows Firewall service)
+  encryptionEnabled    -- needs t_sccm_gs_bitlockerdetails (ProtectionStatus, EncryptionPercentage)
+  screenLockEnabled    -- needs t_sccm_gs_screensaversettings (IsEnabled, IsSecure, WaitInterval)
+  windowsServices      -- needs t_sccm_gs_services
+  macAddress           -- needs t_sccm_gs_networkadapterconfiguration
   browserExtensions    -- not captured by SCCM
 """
 
@@ -47,7 +51,7 @@ AU_OPTIONS: Dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Existing helpers (unchanged)
 # ---------------------------------------------------------------------------
 
 def _match_signatures(app_name: str, signatures: List[str]) -> bool:
@@ -112,10 +116,6 @@ def _auto_update(wu: Dict[str, Any]) -> Tuple[bool, str]:
     return enabled, explanation
 
 
-# ---------------------------------------------------------------------------
-# Main transform
-# ---------------------------------------------------------------------------
-
 def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
     """
     Extract the user's email from the user identity record for use as personnelId.
@@ -132,75 +132,199 @@ def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def to_drata_record(merged: Dict[str, Any]) -> Dict[str, Any]:
-    """Transform a merged SCCM record into a Drata Custom MDM payload."""
+# ---------------------------------------------------------------------------
+# Blocked-field helpers -- each returns None when its source table is absent
+# ---------------------------------------------------------------------------
+
+def _extract_encryption(
+    bitlocker: Optional[Dict[str, Any]],
+) -> Tuple[Optional[bool], Optional[Dict[str, Any]]]:
+    """Derive encryptionEnabled from a BitLocker details row. Returns (None, None) if table absent."""
+    if not bitlocker:
+        return None, None
+    protected = str(bitlocker.get('ProtectionStatus') or '').strip()
+    pct_raw = bitlocker.get('EncryptionPercentage')
+    try:
+        pct = int(pct_raw) if pct_raw is not None else None
+    except (ValueError, TypeError):
+        pct = None
+    enabled = protected == '1' and pct == 100
+    explanation = {
+        'bootPartitionEncryptionDetails': {
+            'partitionFileVault2Percent': pct,
+            'partitionFileVault2State': 'ENCRYPTED' if enabled else 'DECRYPTED',
+            'partitionName': bitlocker.get('DriveLetter') or 'C:',
+        }
+    }
+    return enabled, explanation
+
+
+def _extract_screen_lock(
+    screensaver: Optional[Dict[str, Any]],
+) -> Tuple[Optional[bool], Optional[str], Optional[int]]:
+    """Derive screenLockEnabled from a screensaver settings row. Returns (None, None, None) if absent."""
+    if not screensaver:
+        return None, None, None
+    is_enabled = screensaver.get('IsEnabled')
+    is_secure = screensaver.get('IsSecure')  # requires password on screensaver dismiss
+    wait_raw = screensaver.get('WaitInterval')
+    try:
+        wait = int(wait_raw) if wait_raw is not None else None
+    except (ValueError, TypeError):
+        wait = None
+    enabled = bool(is_enabled) and bool(is_secure)
+    if wait is not None:
+        explanation = f"ScreenLock delay is {wait} minutes"
+    elif enabled:
+        explanation = 'Enabled'
+    else:
+        explanation = 'Disabled'
+    return enabled, explanation, wait
+
+
+def _extract_firewall(
+    services: Optional[List[Dict[str, Any]]],
+) -> Tuple[Optional[bool], Optional[str]]:
+    """Derive firewallEnabled from Windows services rows. Returns (None, None) if table absent."""
+    if services is None:
+        return None, None
+    for svc in services:
+        name = (svc.get('Name') or svc.get('name') or '').lower()
+        if 'mpssvc' in name or 'windows firewall' in name:
+            status = svc.get('Status') or svc.get('status') or ''
+            enabled = str(status).lower() == 'running'
+            return enabled, str(status)
+    return False, 'Service not found'
+
+
+def _build_windows_services(
+    services: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Map raw service rows to the Drata windowsServices shape. Returns [] if table absent."""
+    if not services:
+        return []
+    return [
+        {
+            'description': svc.get('Description') or svc.get('description') or '',
+            'name': svc.get('Name') or svc.get('name') or '',
+            'startType': svc.get('StartType') or svc.get('startType') or '',
+            'status': svc.get('Status') or svc.get('status') or '',
+        }
+        for svc in services
+    ]
+
+
+def _extract_mac_address(
+    network_adapter: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Return the MAC address from a network adapter config row. Returns None if table absent."""
+    if not network_adapter:
+        return None
+    return (
+        network_adapter.get('MACAddress0')
+        or network_adapter.get('MACAddress')
+        or network_adapter.get('macaddress')
+        or None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: Feature extraction -- all triangulation logic lives here
+# ---------------------------------------------------------------------------
+
+def extract_features(merged: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Derive all boolean signals and explanation data from a merged SCCM record.
+
+    Optional table keys (bitlocker, screensaver, services, network_adapter) are
+    present in merged only when the corresponding table was pulled. Each helper
+    returns None/empty when its input is None, preserving null output until the
+    real table is wired in via TABLE_REGISTRY.
+    """
     device = merged.get('device', {})
     wu = merged.get('windows_update', {})
     software = merged.get('installed_software', [])
     user = merged.get('user', {})
 
-    app_list = _build_app_list(software)
     av_enabled, av_apps = _detect_apps(software, ANTIVIRUS_SIGNATURES)
     pm_enabled, pm_apps = _detect_apps(software, PASSWORD_MANAGER_SIGNATURES)
-    auto_update_enabled, auto_update_explanation = _auto_update(wu)
+    au_enabled, au_explanation = _auto_update(wu)
+    fw_enabled, fw_explanation = _extract_firewall(merged.get('services'))
+    enc_enabled, enc_explanation = _extract_encryption(merged.get('bitlocker'))
+    sl_enabled, sl_explanation, sl_time = _extract_screen_lock(merged.get('screensaver'))
 
     return {
-        # Identity
+        'resource_id': merged.get('resource_id'),
+        'device': device,
+        'user': user,
+        'av_enabled': av_enabled,
+        'av_apps': av_apps,
+        'pm_enabled': pm_enabled,
+        'pm_apps': pm_apps,
+        'au_enabled': au_enabled,
+        'au_explanation': au_explanation,
+        'app_list': _build_app_list(software),
+        'fw_enabled': fw_enabled,
+        'fw_explanation': fw_explanation,
+        'enc_enabled': enc_enabled,
+        'enc_explanation': enc_explanation,
+        'sl_enabled': sl_enabled,
+        'sl_explanation': sl_explanation,
+        'sl_time': sl_time,
+        'windows_services': _build_windows_services(merged.get('services')),
+        'mac_address': _extract_mac_address(merged.get('network_adapter')),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: Drata format assembly -- mapping only, no logic
+# ---------------------------------------------------------------------------
+
+def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
+    """Map an extracted-features dict to the Drata Custom Device Connection JSON shape."""
+    device = features['device']
+    user = features['user']
+    return {
         'personnelId': _resolve_personnel_id(user),
         'alias': device.get('Name0') or device.get('Netbios_Name0'),
-        # AADDeviceID is the preferred stable identifier; Unique_User_Name0 (domain\user)
-        # is a more meaningful fallback than the SCCM-internal ResourceID integer
         'externalId': (
             device.get('AADDeviceID')
             or user.get('Unique_User_Name0')
-            or str(merged.get('resource_id'))
+            or str(features.get('resource_id'))
         ),
         'serialNumber': device.get('SerialNumber'),
         'model': device.get('CPUType0'),
-        'macAddress': None,  # Not present in current SCCM tables
-
-        # Platform
+        'macAddress': features['mac_address'],
         'platformName': _platform_name(device.get('Operating_System_Name_and0')),
         'platformVersion': device.get('Build01') or device.get('BuildExt'),
-
-        # Antivirus
-        'antivirusEnabled': av_enabled,
-        'antivirusExplanation': {
-            'antivirusApps': av_apps,
-        },
-
-        # Applications
-        'appList': app_list,
-        'browserExtensions': [],  # Not captured by SCCM
-
-        # Auto update
-        'autoUpdateEnabled': auto_update_enabled,
-        'autoUpdateExplanation': auto_update_explanation,
-
-        # Firewall -- requires gs_firewall or windows services table
-        'firewallEnabled': None,
-        'firewallExplanation': None,
-
-        # Encryption -- requires BitLocker / gs_encryptablevolume table
-        'encryptionEnabled': None,
-        'encryptionExplanation': None,
-
-        # Screen lock -- requires gs_screensaver or policy table
-        'screenLockEnabled': None,
-        'screenLockExplanation': None,
-        'screenLockTime': None,
-
-        # Password manager
-        'passwordManagerEnabled': pm_enabled,
-        'passwordManagerExplanation': {
-            'passwordManagerApps': pm_apps,
-        },
-
-        # Windows services -- requires gs_services table
-        'windowsServices': [],
+        'antivirusEnabled': features['av_enabled'],
+        'antivirusExplanation': {'antivirusApps': features['av_apps']},
+        'appList': features['app_list'],
+        'browserExtensions': [],
+        'autoUpdateEnabled': features['au_enabled'],
+        'autoUpdateExplanation': features['au_explanation'],
+        'firewallEnabled': features['fw_enabled'],
+        'firewallExplanation': features['fw_explanation'],
+        'encryptionEnabled': features['enc_enabled'],
+        'encryptionExplanation': features['enc_explanation'],
+        'screenLockEnabled': features['sl_enabled'],
+        'screenLockExplanation': features['sl_explanation'],
+        'screenLockTime': features['sl_time'],
+        'passwordManagerEnabled': features['pm_enabled'],
+        'passwordManagerExplanation': {'passwordManagerApps': features['pm_apps']},
+        'windowsServices': features['windows_services'],
     }
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def to_drata_record(merged: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform a merged SCCM record into a Drata Custom MDM payload."""
+    return format_for_drata(extract_features(merged))
 
 
 def transform_all(merged_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Transform a list of merged records into Drata MDM payloads."""
-    return [to_drata_record(r) for r in merged_records]
+    return [format_for_drata(extract_features(r)) for r in merged_records]

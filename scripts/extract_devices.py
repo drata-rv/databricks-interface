@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
 """
-Device ETL: pulls four SCCM tables from Databricks, joins them on resource_id
-and Netbios_Name0, and writes a single JSON file ready for Drata Custom Device Connection.
+Device ETL: pulls SCCM tables from Databricks, joins them on resource_id
+and Netbios_Name0, and produces JSON output for Drata Custom Device Connection.
 
-Output structure per device:
-    {
-        "resource_id": 12345,
-        "device":             { ...fields from the main device table... },
-        "windows_update":     { ...fields from t_sccm_gs_windowsupdate... },
-        "installed_software": [ ...one entry per row from t_sccm_gs_installed_software... ],
-        "user":               { ...fields from the user identity table... }
-    }
+Users are the authoritative anchor: only devices with a matched user record
+are included in the output. Devices without a matching user are counted and logged.
+
+Table configuration:
+  - TABLE_REGISTRY defines all secondary tables (test workspace).
+  - Devices table is always pulled first from the prod workspace.
+  - required=True entries exit if env var not set.
+  - required=False entries are skipped (null) when env var is empty.
+  - Adding a new SCCM table: uncomment one registry line, set the env var.
 
 Usage:
-    python scripts/extract_devices.py \\
-        --devices    catalog.schema.t_sccm_v_r_system \\
-        --wu         catalog.schema.t_sccm_gs_windowsupdate \\
-        --software   catalog.schema.t_sccm_gs_installed_software \\
-        --users      catalog.schema.t_sccm_user_table
-
-Table paths and warehouse IDs can also be set via environment variables:
-    DATABRICKS_TABLE_DEVICES
-    DATABRICKS_TABLE_WINDOWS_UPDATE
-    DATABRICKS_TABLE_INSTALLED_SOFTWARE
-    DATABRICKS_TABLE_USERS
-    DATABRICKS_WAREHOUSE_ID          -- used for the devices table (prod)
-    DATABRICKS_WAREHOUSE_ID_TEST     -- used for all test catalog tables (wu, software, users)
-                                        Falls back to DATABRICKS_WAREHOUSE_ID if not set.
-
-All four tables are required. Script exits with a non-zero code if any pull fails.
+    python scripts/extract_devices.py
+    python scripts/extract_devices.py --dry-run   # full pipeline, skip Drata push
+    python scripts/extract_devices.py --debug     # print resolved env before running
 """
 
 import argparse
+import collections
 import json
 import os
 import sys
@@ -42,26 +31,46 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from db.auth import get_client, get_client_for, get_config, load_env
+from db.auth import get_client_for, load_env
 from db import queries
 from db.queries import rows_to_records
 from db.transform import transform_all
 
-# Load .env before parse_args() so os.getenv() defaults are populated
 load_env()
 
 
 # ---------------------------------------------------------------------------
-# Internal / pipeline metadata columns -- excluded from the output payload
+# Internal column stripping
 # ---------------------------------------------------------------------------
 STRIP_PREFIXES = ("__",)
-
 _MAX_RETRIES = 3
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
 
 
 def is_internal(col: str) -> bool:
     return any(col.startswith(p) for p in STRIP_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# Table registry
+# ---------------------------------------------------------------------------
+TableSpec = collections.namedtuple(
+    'TableSpec', ['label', 'env_var', 'client_key', 'filter_type', 'required']
+)
+# client_key   : 'prod' | 'test'
+# filter_type  : 'resource_id' | 'netbios_name'
+# required     : True = env var must be set; False = skipped (None) when empty
+
+TABLE_REGISTRY = [
+    TableSpec('windows_update',     'DATABRICKS_TABLE_WINDOWS_UPDATE',     'test', 'resource_id', True),
+    TableSpec('installed_software', 'DATABRICKS_TABLE_INSTALLED_SOFTWARE', 'test', 'resource_id', True),
+    TableSpec('users',              'DATABRICKS_TABLE_USERS',              'test', 'netbios_name', True),
+    # Uncomment when Nationwide confirms table names:
+    # TableSpec('bitlocker',       'DATABRICKS_TABLE_BITLOCKER',       'test', 'resource_id', False),
+    # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'test', 'resource_id', False),
+    # TableSpec('services',        'DATABRICKS_TABLE_SERVICES',        'test', 'resource_id', False),
+    # TableSpec('network_adapter', 'DATABRICKS_TABLE_NETWORK_ADAPTER', 'test', 'resource_id', False),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -109,11 +118,7 @@ def pull_table(
     filter_sql: Optional[str] = None,
     timeout: int = 300,
 ) -> List[Dict[str, Any]]:
-    """Pull a table and return cleaned records. Exits on failure.
-
-    Secondary tables (wu, software, users) are queried with an IN-clause filter
-    scoped to the device set -- no LIMIT applied to those pulls.
-    """
+    """Pull a table and return cleaned records. Exits on failure after retries."""
     parts = [f"SELECT * FROM {table}"]
     if filter_sql:
         parts.append(f"WHERE {filter_sql}")
@@ -153,15 +158,25 @@ def merge(
     windows_update: List[Dict[str, Any]],
     installed_software: List[Dict[str, Any]],
     users: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    bitlocker: Optional[List[Dict[str, Any]]] = None,
+    screensaver: Optional[List[Dict[str, Any]]] = None,
+    services: Optional[List[Dict[str, Any]]] = None,
+    network_adapter: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
     """
-    Left-join all secondary tables onto devices.
+    Inner join: users are the anchor. Only devices with a matched user are included.
 
-    - windows_update and installed_software join on resource_id.
-    - users joins on Netbios_Name0 (machine name present in both tables).
-
-    Devices with no match in a secondary table still appear; their key is {} or [].
+    Returns (records, dropped_count) where dropped_count is the number of devices
+    that had no matching user entry.
     """
+    # Index devices by machine name
+    device_index: Dict[str, Dict[str, Any]] = {}
+    for dev in devices:
+        netbios = dev.get('Netbios_Name0') or dev.get('Name0')
+        if netbios:
+            device_index[netbios] = dev
+
+    # Index resource_id-keyed tables
     wu_index: Dict[int, Dict[str, Any]] = {}
     for row in windows_update:
         rid = get_resource_id(row)
@@ -175,32 +190,66 @@ def merge(
             entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
             sw_index.setdefault(rid, []).append(entry)
 
-    # User table: keyed by Netbios_Name0 -- one record per machine
-    user_index: Dict[str, Dict[str, Any]] = {}
+    # Optional tables -- build index only when table was pulled
+    bitlocker_index: Optional[Dict[int, Dict[str, Any]]] = None
+    if bitlocker is not None:
+        bitlocker_index = {}
+        for row in bitlocker:
+            rid = get_resource_id(row)
+            if rid is not None:
+                bitlocker_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+
+    screensaver_index: Optional[Dict[int, Dict[str, Any]]] = None
+    if screensaver is not None:
+        screensaver_index = {}
+        for row in screensaver:
+            rid = get_resource_id(row)
+            if rid is not None:
+                screensaver_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+
+    services_index: Optional[Dict[int, List[Dict[str, Any]]]] = None
+    if services is not None:
+        services_index = {}
+        for row in services:
+            rid = get_resource_id(row)
+            if rid is not None:
+                entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                services_index.setdefault(rid, []).append(entry)
+
+    network_adapter_index: Optional[Dict[int, Dict[str, Any]]] = None
+    if network_adapter is not None:
+        network_adapter_index = {}
+        for row in network_adapter:
+            rid = get_resource_id(row)
+            if rid is not None:
+                network_adapter_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+
+    # User-centric iteration: users anchor the output set
+    matched_netbios: set = set()
+    output: List[Dict[str, Any]] = []
     for row in users:
         netbios = row.get('Netbios_Name0') or row.get('netbios_name0')
-        if netbios:
-            entry = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
-            if netbios in user_index:
-                print(f"  [WARN] duplicate user record for {netbios!r} -- keeping first")
-            else:
-                user_index[netbios] = entry
-
-    output = []
-    for device in devices:
+        if not netbios or netbios not in device_index:
+            continue
+        device = device_index[netbios]
+        matched_netbios.add(netbios)
         rid = get_resource_id(device)
-        # Netbios_Name0 is the join key between the device and user tables
-        netbios = device.get('Netbios_Name0') or device.get('Name0')
+        user_fields = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
         device_fields = {k: v for k, v in device.items() if k not in ("resource_id", "ResourceID", "ResourceType")}
         output.append({
             "resource_id": rid,
             "device": device_fields,
             "windows_update": wu_index.get(rid, {}),
             "installed_software": sw_index.get(rid, []),
-            "user": user_index.get(netbios, {}),
+            "user": user_fields,
+            "bitlocker": bitlocker_index.get(rid) if bitlocker_index is not None else None,
+            "screensaver": screensaver_index.get(rid) if screensaver_index is not None else None,
+            "services": services_index.get(rid, []) if services_index is not None else None,
+            "network_adapter": network_adapter_index.get(rid) if network_adapter_index is not None else None,
         })
 
-    return output
+    dropped = len(devices) - len(matched_netbios)
+    return output, dropped
 
 
 def write_json(payload: List[Dict[str, Any]], output_path: Path) -> None:
@@ -223,31 +272,13 @@ def default_output_paths() -> Tuple[Path, Path]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Pull and join SCCM device tables from Databricks into a single JSON payload."
+        description="Pull SCCM tables from Databricks, merge by user, transform to Drata MDM format."
     )
     parser.add_argument(
         "--devices",
         metavar="CATALOG.SCHEMA.TABLE",
         default=os.getenv("DATABRICKS_TABLE_DEVICES", ""),
-        help="Fully qualified path to the main device table.",
-    )
-    parser.add_argument(
-        "--wu",
-        metavar="CATALOG.SCHEMA.TABLE",
-        default=os.getenv("DATABRICKS_TABLE_WINDOWS_UPDATE", ""),
-        help="Fully qualified path to t_sccm_gs_windowsupdate.",
-    )
-    parser.add_argument(
-        "--software",
-        metavar="CATALOG.SCHEMA.TABLE",
-        default=os.getenv("DATABRICKS_TABLE_INSTALLED_SOFTWARE", ""),
-        help="Fully qualified path to t_sccm_gs_installed_software.",
-    )
-    parser.add_argument(
-        "--users",
-        metavar="CATALOG.SCHEMA.TABLE",
-        default=os.getenv("DATABRICKS_TABLE_USERS", ""),
-        help="Fully qualified path to the user identity table (si_test_catalog). Uses DATABRICKS_TABLE_USERS.",
+        help="Fully qualified path to the main device table (prod workspace). Uses DATABRICKS_TABLE_DEVICES.",
     )
     parser.add_argument(
         "--warehouse-prod",
@@ -295,7 +326,7 @@ def parse_args() -> argparse.Namespace:
         "--timeout",
         type=int,
         default=int(os.getenv("DATABRICKS_QUERY_TIMEOUT", "300")),
-        help="Per-query timeout in seconds, covering cold warehouse start (default: 300). Uses DATABRICKS_QUERY_TIMEOUT.",
+        help="Per-query timeout in seconds (default: 300). Uses DATABRICKS_QUERY_TIMEOUT.",
     )
     parser.add_argument(
         "--output-raw",
@@ -308,6 +339,12 @@ def parse_args() -> argparse.Namespace:
         metavar="FILE",
         default="",
         help="Path for the Drata-formatted JSON. Defaults to output/devices_<timestamp>_drata.json.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Run the full pipeline but skip the Drata API push. Output files are still written.",
     )
     parser.add_argument(
         "--debug",
@@ -325,11 +362,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # Validate required workspace/warehouse config upfront
     missing = [name for name, val in [
         ("--devices (or DATABRICKS_TABLE_DEVICES)", args.devices),
-        ("--wu (or DATABRICKS_TABLE_WINDOWS_UPDATE)", args.wu),
-        ("--software (or DATABRICKS_TABLE_INSTALLED_SOFTWARE)", args.software),
-        ("--users (or DATABRICKS_TABLE_USERS)", args.users),
         ("--host-prod (or DATABRICKS_HOST_PROD)", args.host_prod),
         ("--host-test (or DATABRICKS_HOST_TEST)", args.host_test),
         ("--warehouse-prod (or DATABRICKS_WAREHOUSE_ID)", args.warehouse_prod),
@@ -356,64 +391,111 @@ def main() -> None:
     print(f"Query timeout    : {args.timeout}s per table")
     print(f"Output (raw)     : {raw_path}")
     print(f"Output (drata)   : {drata_path}")
+    if args.dry_run:
+        print(f"Mode             : DRY RUN (Drata push skipped)")
 
     if args.debug:
         databrickscfg = Path.home() / ".databrickscfg"
         print(f"\n-- DEBUG --")
         print(f"DATABRICKS_HOST_PROD             : {os.getenv('DATABRICKS_HOST_PROD', '(not set)')}")
         print(f"DATABRICKS_HOST_TEST             : {os.getenv('DATABRICKS_HOST_TEST', '(not set)')}")
-        print(f"DATABRICKS_TOKEN_PROD env        : {'(set)' if os.getenv('DATABRICKS_TOKEN_PROD') or os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
-        print(f"DATABRICKS_TOKEN_TEST env        : {'(set)' if os.getenv('DATABRICKS_TOKEN_TEST') or os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
+        print(f"DATABRICKS_TOKEN_PROD            : {'(set)' if os.getenv('DATABRICKS_TOKEN_PROD') or os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
+        print(f"DATABRICKS_TOKEN_TEST            : {'(set)' if os.getenv('DATABRICKS_TOKEN_TEST') or os.getenv('DATABRICKS_TOKEN') else '(not set)'}")
         print(f"DATABRICKS_WAREHOUSE_ID          : {os.getenv('DATABRICKS_WAREHOUSE_ID', '(not set)')}")
         print(f"DATABRICKS_WAREHOUSE_ID_TEST     : {os.getenv('DATABRICKS_WAREHOUSE_ID_TEST', '(not set)')}")
         print(f"DATABRICKS_TABLE_DEVICES         : {os.getenv('DATABRICKS_TABLE_DEVICES', '(not set)')}")
-        print(f"DATABRICKS_TABLE_WINDOWS_UPDATE  : {os.getenv('DATABRICKS_TABLE_WINDOWS_UPDATE', '(not set)')}")
-        print(f"DATABRICKS_TABLE_INSTALLED_SOFTWARE: {os.getenv('DATABRICKS_TABLE_INSTALLED_SOFTWARE', '(not set)')}")
-        print(f"DATABRICKS_TABLE_USERS           : {os.getenv('DATABRICKS_TABLE_USERS', '(not set)')}")
+        for spec in TABLE_REGISTRY:
+            val = os.getenv(spec.env_var, '(not set)')
+            req = 'required' if spec.required else 'optional'
+            print(f"{spec.env_var:<40}: {val}  [{req}]")
         print(f"DATABRICKS_QUERY_TIMEOUT         : {os.getenv('DATABRICKS_QUERY_TIMEOUT', '(not set, using 300)')}")
+        print(f"DRATA_API_KEY                    : {'(set)' if os.getenv('DRATA_API_KEY') else '(not set)'}")
+        print(f"DRATA_CONNECTION_ID              : {os.getenv('DRATA_CONNECTION_ID', '(not set)')}")
         print(f"~/.databrickscfg exists          : {databrickscfg.exists()}")
         print(f"-- END DEBUG --\n")
     else:
         print()
 
-    # Step 1: devices sets the scope for all downstream table pulls
+    # Step 1: devices sets the scope for all downstream pulls
     devices = pull_table(prod_client, args.devices, args.warehouse_prod, "devices",
                          limit=args.limit, timeout=args.timeout)
     if not devices:
         print("  [FAIL] devices returned 0 rows -- verify table path and warehouse permissions")
         sys.exit(1)
 
-    # Build IN-clause filters scoped to the pulled device set
     resource_ids = [rid for rid in (get_resource_id(r) for r in devices) if rid is not None]
     netbios_names = [n for n in (r.get('Netbios_Name0') or r.get('Name0') for r in devices) if n]
-    rid_filter = _ids_filter(resource_ids)
-    name_filter = _names_filter(netbios_names)
+    filter_map = {
+        'resource_id': _ids_filter(resource_ids),
+        'netbios_name': _names_filter(netbios_names),
+    }
 
-    # Step 2: pull secondary tables scoped to the device set (no row cap)
-    wu = pull_table(test_client, args.wu, args.warehouse_test, "windows_update",
-                    filter_sql=rid_filter, timeout=args.timeout)
-    software = pull_table(test_client, args.software, args.warehouse_test, "installed_software",
-                          filter_sql=rid_filter, timeout=args.timeout)
-    users = pull_table(test_client, args.users, args.warehouse_test, "users",
-                       filter_sql=name_filter, timeout=args.timeout)
+    # Step 2: pull secondary tables via registry
+    clients = {'prod': prod_client, 'test': test_client}
+    pulled: Dict[str, Any] = {}
 
-    for label, result in [("windows_update", wu), ("installed_software", software), ("users", users)]:
-        if not result:
-            print(f"  [WARN] {label} returned 0 rows")
+    for spec in TABLE_REGISTRY:
+        table_path = os.getenv(spec.env_var, '').strip()
+        if not table_path:
+            if spec.required:
+                print(f"  [FAIL] {spec.env_var} is required but not set")
+                sys.exit(1)
+            pulled[spec.label] = None
+            continue
+        wh = args.warehouse_test if spec.client_key == 'test' else args.warehouse_prod
+        data = pull_table(
+            clients[spec.client_key], table_path, wh, spec.label,
+            filter_sql=filter_map[spec.filter_type], timeout=args.timeout,
+        )
+        pulled[spec.label] = data
+        if not data:
+            print(f"  [WARN] {spec.label} returned 0 rows")
 
-    print("\nMerging on resource_id / Netbios_Name0 ...")
-    merged = merge(devices, wu, software, users)
-    print(f"  {len(merged)} device records assembled.")
+    # Step 3: merge (user-centric inner join)
+    print("\nMerging (user-centric) ...")
+    merged, dropped = merge(
+        devices,
+        pulled['windows_update'],
+        pulled['installed_software'],
+        pulled['users'],
+        bitlocker=pulled.get('bitlocker'),
+        screensaver=pulled.get('screensaver'),
+        services=pulled.get('services'),
+        network_adapter=pulled.get('network_adapter'),
+    )
+    print(f"  {len(merged)} records assembled.")
+    if dropped:
+        print(f"  [INFO] {dropped} device(s) had no matching user and were excluded.")
 
+    # Step 4: transform to Drata MDM format
     print("Transforming to Drata MDM format ...")
     drata_payload = transform_all(merged)
     print(f"  {len(drata_payload)} records transformed.")
 
+    # Step 5: write output files
     write_json(merged, raw_path)
     print(f"\n[OK] Raw merged JSON  : {raw_path}")
 
     write_json(drata_payload, drata_path)
-    print(f"[OK] Drata MDM JSON   : {drata_path}\n")
+    print(f"[OK] Drata MDM JSON   : {drata_path}")
+
+    # Step 6: push to Drata API
+    api_key = os.getenv("DRATA_API_KEY", "").strip()
+    connection_id = os.getenv("DRATA_CONNECTION_ID", "").strip()
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] Would push {len(drata_payload)} records to Drata (skipped).\n")
+    elif not api_key or not connection_id:
+        print("\n[SKIP] DRATA_API_KEY or DRATA_CONNECTION_ID not set -- skipping push.\n")
+    else:
+        from db.drata_client import DrataClient
+        print("\nPushing to Drata ...")
+        drata = DrataClient(api_key=api_key, connection_id=connection_id)
+        result = drata.push_batch(drata_payload)
+        if result['errors']:
+            print(f"  [WARN] {len(result['errors'])} batch(es) failed -- review output above.")
+        else:
+            print(f"  [OK] Pushed {result['total']} records in {result['batches']} batch(es).\n")
 
 
 if __name__ == "__main__":
