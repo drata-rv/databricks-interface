@@ -113,41 +113,17 @@ class DrataClient:
         errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': last_err})
         return False
 
-    def fetch_current_personnel_emails(self, statuses=None, max_records=None):
+    def get_person_status(self, email: str):
         """
-        Fetch email addresses for all active Drata personnel.
-        Returns a frozenset of lowercase email strings.
-
-        max_records caps how many personnel records are fetched. When set, the
-        filter is partial -- it only covers the first max_records entries returned
-        by the API. For a complete filter use the personnel cache (--refresh-personnel).
+        Look up a single person in Drata by email address.
+        Returns their employmentStatus string, or None if not found (404).
+        Raises on unexpected HTTP errors.
         """
-        if statuses is None:
-            statuses = ['CURRENT_EMPLOYEE', 'CURRENT_CONTRACTOR']
-        url = f"{_BASE_URL}/public/v2/personnel"
-        emails = set()
-        cursor = None
-        page = 0
-        while True:
-            page += 1
-            params = {'size': 500, 'expand[]': 'user'}
-            for s in statuses:
-                params.setdefault('employmentStatus[]', []).append(s)
-            if cursor:
-                params['cursor'] = cursor
-            resp = self._session.get(url, params=params, timeout=self._timeout)
-            resp.raise_for_status()
-            body = resp.json()
-            for p in body.get('data', []):
-                email = (p.get('user') or {}).get('email')
-                if email:
-                    emails.add(email.lower())
-            cursor = body.get('pagination', {}).get('cursor')
-            print(f"  Page {page}: {len(body.get('data', []))} personnel, {len(emails)} emails so far ...")
-            if max_records and len(emails) >= max_records:
-                print(f"  [CAP] Personnel fetch stopped at {len(emails)} (max_records={max_records}).")
-                print(f"        Filter is partial -- run with --refresh-personnel for a complete roster.")
-                break
-            if not cursor:
-                break
-        return frozenset(emails)
+        from urllib.parse import quote
+        encoded = quote(email, safe='')
+        url = f"{_BASE_URL}/public/v2/personnel/email:{encoded}"
+        resp = self._session.get(url, timeout=self._timeout)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json().get('employmentStatus')
