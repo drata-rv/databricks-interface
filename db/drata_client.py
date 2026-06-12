@@ -110,5 +110,36 @@ class DrataClient:
                     time.sleep(wait)
 
         print(f"    [FAIL] all {_MAX_RETRIES} attempts exhausted: {last_err}")
-        errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': msg})
+        errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': last_err})
         return False
+
+    def fetch_current_personnel_emails(self, statuses=None):
+        """
+        Fetch email addresses for all active Drata personnel.
+        Returns a frozenset of lowercase email strings.
+        """
+        if statuses is None:
+            statuses = ['CURRENT_EMPLOYEE', 'CURRENT_CONTRACTOR']
+        url = f"{_BASE_URL}/public/v2/personnel"
+        emails = set()
+        cursor = None
+        page = 0
+        while True:
+            page += 1
+            params = {'size': 500, 'expand[]': 'user'}
+            for s in statuses:
+                params.setdefault('employmentStatus[]', []).append(s)
+            if cursor:
+                params['cursor'] = cursor
+            resp = self._session.get(url, params=params, timeout=self._timeout)
+            resp.raise_for_status()
+            body = resp.json()
+            for p in body.get('data', []):
+                email = (p.get('user') or {}).get('email')
+                if email:
+                    emails.add(email.lower())
+            cursor = body.get('pagination', {}).get('cursor')
+            print(f"  Page {page}: {len(body.get('data', []))} personnel, {len(emails)} emails so far ...")
+            if not cursor:
+                break
+        return frozenset(emails)

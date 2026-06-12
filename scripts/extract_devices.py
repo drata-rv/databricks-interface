@@ -498,6 +498,19 @@ def main() -> None:
     else:
         print()
 
+    # Step 0: fetch current Drata personnel to scope the run
+    api_key = os.getenv("DRATA_API_KEY", "").strip()
+    connection_id = os.getenv("DRATA_CONNECTION_ID", "").strip()
+    current_emails = None  # None means no filter applied
+    if api_key:
+        from db.drata_client import DrataClient
+        print("Fetching current personnel from Drata ...")
+        drata_pre = DrataClient(api_key=api_key, connection_id=connection_id)
+        current_emails = drata_pre.fetch_current_personnel_emails()
+        print(f"  {len(current_emails)} current employees/contractors found in Drata.")
+    else:
+        print("  [WARN] DRATA_API_KEY not set -- personnel filter skipped, all users will be processed.")
+
     # Step 1: load users first (anchor for all downstream scope)
     if args.local_users:
         if not Path(_LOCAL_USERS_FILE).exists():
@@ -512,6 +525,24 @@ def main() -> None:
             print("  [FAIL] DATABRICKS_TABLE_USERS is required but not set (or use --local-users)")
             sys.exit(1)
         all_users = pull_table(test_client, users_table, args.warehouse_test, "users", timeout=args.timeout)
+
+    # Step 1b: filter to active Drata personnel only
+    if current_emails is not None:
+        upn_key = 'User_Princiipal_Name0'  # double-i typo in source
+        compare_emails = current_emails
+        if args.sandbox:
+            # Drata sandbox emails are @sandbox.nationwide.com; SCCM UPNs are @nationwide.com
+            compare_emails = frozenset(
+                e.replace('@sandbox.nationwide.com', '@nationwide.com')
+                for e in current_emails
+            )
+        before = len(all_users)
+        all_users = [
+            u for u in all_users
+            if (u.get(upn_key) or u.get('User_Principal_Name0') or '').lower() in compare_emails
+        ]
+        skipped = before - len(all_users)
+        print(f"  Personnel filter: {len(all_users)} active / {skipped} former/inactive excluded.")
 
     if args.limit and len(all_users) > args.limit:
         print(f"  Limiting to {args.limit} users (of {len(all_users)} total).")
@@ -604,9 +635,6 @@ def main() -> None:
     print(f"[OK] Drata MDM JSON   : {drata_path}")
 
     # Step 7: push to Drata API
-    api_key = os.getenv("DRATA_API_KEY", "").strip()
-    connection_id = os.getenv("DRATA_CONNECTION_ID", "").strip()
-
     # Filter records with no usable personnelId before pushing -- sending null to Drata
     # guarantees a 400; skip locally and log so the run doesn't burn retries on bad data.
     valid_payload = [r for r in drata_payload if r.get('personnelId')]
@@ -620,7 +648,6 @@ def main() -> None:
     elif not api_key or not connection_id:
         print("\n[SKIP] DRATA_API_KEY or DRATA_CONNECTION_ID not set -- skipping push.\n")
     else:
-        from db.drata_client import DrataClient
         print("\nPushing to Drata ...")
         drata = DrataClient(api_key=api_key, connection_id=connection_id)
         result = drata.push_batch(drata_payload)
