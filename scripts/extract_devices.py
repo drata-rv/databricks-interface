@@ -608,9 +608,9 @@ def main() -> None:
         drata = DrataClient(api_key=api_key, connection_id=connection_id)
         result = drata.push_batch(drata_payload)
         if result['errors']:
-            print(f"  [WARN] {len(result['errors'])} batch(es) failed -- review output above.")
+            print(f"  [WARN] {len(result['errors'])} record(s) failed -- review output above.")
         else:
-            print(f"  [OK] Pushed {result['total']} records in {result['batches']} batch(es).\n")
+            print(f"  [OK] Pushed {result['pushed']}/{result['total']} records.\n")
 
 
 if __name__ == "__main__":
