@@ -7,8 +7,9 @@ Users are the authoritative anchor: only devices with a matched user record
 are included in the output. Devices without a matching user are counted and logged.
 
 Table configuration:
-  - TABLE_REGISTRY defines all secondary tables (test workspace).
-  - Devices table is always pulled first from the prod workspace.
+  - Users are loaded first and anchor all downstream scope.
+  - Devices are pulled scoped to user machine names (no LIMIT).
+  - TABLE_REGISTRY defines secondary tables (installed_software batched, test workspace).
   - required=True entries exit if env var not set.
   - required=False entries are skipped (null) when env var is empty.
   - Adding a new SCCM table: uncomment one registry line, set the env var.
@@ -45,6 +46,7 @@ load_env()
 STRIP_PREFIXES = ("__",)
 _MAX_RETRIES = 3
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
+_SW_BATCH_SIZE = 200
 
 
 def is_internal(col: str) -> bool:
@@ -55,21 +57,21 @@ def is_internal(col: str) -> bool:
 # Table registry
 # ---------------------------------------------------------------------------
 TableSpec = collections.namedtuple(
-    'TableSpec', ['label', 'env_var', 'client_key', 'filter_type', 'required']
+    'TableSpec', ['label', 'env_var', 'client_key', 'filter_type', 'required', 'batched']
 )
 # client_key   : 'prod' | 'test'
 # filter_type  : 'resource_id' | 'netbios_name'
 # required     : True = env var must be set; False = skipped (None) when empty
+# batched      : True = use pull_table_batched() (IN-clause chunked to _SW_BATCH_SIZE)
 
 TABLE_REGISTRY = [
-    TableSpec('windows_update',     'DATABRICKS_TABLE_WINDOWS_UPDATE',     'test', 'resource_id', True),
-    TableSpec('installed_software', 'DATABRICKS_TABLE_INSTALLED_SOFTWARE', 'test', 'resource_id', True),
-    TableSpec('users',              'DATABRICKS_TABLE_USERS',              'test', 'netbios_name', True),
+    TableSpec('windows_update',     'DATABRICKS_TABLE_WINDOWS_UPDATE',     'test', 'resource_id', True,  False),
+    TableSpec('installed_software', 'DATABRICKS_TABLE_INSTALLED_SOFTWARE', 'test', 'resource_id', True,  True),
     # Uncomment when Nationwide confirms table names:
-    # TableSpec('bitlocker',       'DATABRICKS_TABLE_BITLOCKER',       'test', 'resource_id', False),
-    # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'test', 'resource_id', False),
-    # TableSpec('services',        'DATABRICKS_TABLE_SERVICES',        'test', 'resource_id', False),
-    # TableSpec('network_adapter', 'DATABRICKS_TABLE_NETWORK_ADAPTER', 'test', 'resource_id', False),
+    # TableSpec('bitlocker',       'DATABRICKS_TABLE_BITLOCKER',       'test', 'resource_id', False, False),
+    # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'test', 'resource_id', False, False),
+    # TableSpec('services',        'DATABRICKS_TABLE_SERVICES',        'test', 'resource_id', False, False),
+    # TableSpec('network_adapter', 'DATABRICKS_TABLE_NETWORK_ADAPTER', 'test', 'resource_id', False, False),
 ]
 
 
@@ -151,6 +153,31 @@ def pull_table(
     print(f"         Warehouse : {warehouse_id}")
     print(f"         Error     : {short}")
     sys.exit(1)
+
+
+def pull_table_batched(
+    client: Any,
+    table: str,
+    warehouse_id: str,
+    label: str,
+    ids: List[int],
+    id_column: str = "resource_id",
+    timeout: int = 300,
+) -> List[Dict[str, Any]]:
+    """Pull a large table by chunking the IN-clause into batches of _SW_BATCH_SIZE."""
+    all_records: List[Dict[str, Any]] = []
+    total_batches = (len(ids) + _SW_BATCH_SIZE - 1) // _SW_BATCH_SIZE
+    for i in range(0, len(ids), _SW_BATCH_SIZE):
+        batch = ids[i : i + _SW_BATCH_SIZE]
+        batch_num = i // _SW_BATCH_SIZE + 1
+        records = pull_table(
+            client, table, warehouse_id,
+            f"{label} (batch {batch_num}/{total_batches})",
+            filter_sql=_ids_filter(batch, column=id_column),
+            timeout=timeout,
+        )
+        all_records.extend(records)
+    return all_records
 
 
 def merge(
@@ -261,11 +288,8 @@ def write_json(payload: List[Dict[str, Any]], output_path: Path) -> None:
 _LOCAL_USERS_FILE = "SCCM Employees with Devices - Sandbox.xlsx"
 
 
-def load_users_from_xlsx(path: str, netbios_filter: set) -> List[Dict[str, Any]]:
-    """
-    Load user records from a local xlsx file, scoped to the set of machine names
-    pulled from Databricks. Mirrors the IN-clause scoping applied to the Databricks pull.
-    """
+def load_users_from_xlsx(path: str, netbios_filter: Optional[set] = None) -> List[Dict[str, Any]]:
+    """Load user records from a local xlsx file. When netbios_filter is None, all rows are returned."""
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
@@ -273,7 +297,7 @@ def load_users_from_xlsx(path: str, netbios_filter: set) -> List[Dict[str, Any]]
     records = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         record = {k: v for k, v in zip(headers, row) if k is not None}
-        if record.get('Netbios_Name0') in netbios_filter:
+        if netbios_filter is None or record.get('Netbios_Name0') in netbios_filter:
             records.append(record)
     wb.close()
     return records
@@ -342,7 +366,7 @@ def parse_args() -> argparse.Namespace:
         "--limit",
         type=int,
         default=int(os.getenv("DATABRICKS_LIMIT", "1000")),
-        help="Max rows to pull from the devices table (default: 1000). Secondary tables pull all matching rows.",
+        help="Max users to process per run (default: 1000). Devices and secondary tables are scoped to those users.",
     )
     parser.add_argument(
         "--timeout",
@@ -432,7 +456,7 @@ def main() -> None:
     print(f"Test workspace   : {args.host_test}")
     print(f"Warehouse (prod) : {args.warehouse_prod}")
     print(f"Warehouse (test) : {args.warehouse_test}")
-    print(f"Limit (devices)  : {args.limit} rows")
+    print(f"Limit (users)    : {args.limit} users")
     print(f"Query timeout    : {args.timeout}s per table")
     print(f"Output (raw)     : {raw_path}")
     print(f"Output (drata)   : {drata_path}")
@@ -468,38 +492,54 @@ def main() -> None:
     else:
         print()
 
-    # Step 1: devices sets the scope for all downstream pulls
-    devices = pull_table(prod_client, args.devices, args.warehouse_prod, "devices",
-                         limit=args.limit, timeout=args.timeout)
-    if not devices:
-        print("  [FAIL] devices returned 0 rows -- verify table path and warehouse permissions")
-        sys.exit(1)
-
-    resource_ids = [rid for rid in (get_resource_id(r) for r in devices) if rid is not None]
-    netbios_names = [n for n in (r.get('Netbios_Name0') or r.get('Name0') for r in devices) if n]
-    filter_map = {
-        'resource_id': _ids_filter(resource_ids),
-        'netbios_name': _names_filter(netbios_names),
-    }
-
-    # Step 2: pull secondary tables via registry
-    clients = {'prod': prod_client, 'test': test_client}
-    pulled: Dict[str, Any] = {}
-
-    # Pre-load users from local xlsx when --local-users is set, bypassing Databricks
+    # Step 1: load users first (anchor for all downstream scope)
     if args.local_users:
         if not Path(_LOCAL_USERS_FILE).exists():
             print(f"  [FAIL] Local users file not found: {_LOCAL_USERS_FILE}")
             sys.exit(1)
         print(f"  [LOCAL] Loading users from {_LOCAL_USERS_FILE} ...")
-        pulled['users'] = load_users_from_xlsx(_LOCAL_USERS_FILE, netbios_filter=set(netbios_names))
-        print(f"  {len(pulled['users'])} user records matched from local file.")
-        if not pulled['users']:
-            print("  [WARN] No users matched -- verify Netbios_Name0 values in the xlsx align with the devices pull.")
+        all_users = load_users_from_xlsx(_LOCAL_USERS_FILE, netbios_filter=None)
+        print(f"  {len(all_users)} users loaded.")
+    else:
+        users_table = os.getenv("DATABRICKS_TABLE_USERS", "").strip()
+        if not users_table:
+            print("  [FAIL] DATABRICKS_TABLE_USERS is required but not set (or use --local-users)")
+            sys.exit(1)
+        all_users = pull_table(test_client, users_table, args.warehouse_test, "users", timeout=args.timeout)
+
+    if args.limit and len(all_users) > args.limit:
+        print(f"  Limiting to {args.limit} users (of {len(all_users)} total).")
+        all_users = all_users[:args.limit]
+
+    if not all_users:
+        print("  [FAIL] No users loaded -- check users table or --local-users file")
+        sys.exit(1)
+
+    user_netbios_names = [u.get("Netbios_Name0") or u.get("netbios_name0") for u in all_users]
+    user_netbios_names = [n for n in user_netbios_names if n]
+
+    # Step 2: pull devices scoped to the user set (no LIMIT -- scope comes from users)
+    print(f"  Pulling devices scoped to {len(user_netbios_names)} user machine names ...")
+    devices = pull_table(
+        prod_client, args.devices, args.warehouse_prod, "devices",
+        filter_sql=_names_filter(user_netbios_names),
+        timeout=args.timeout,
+    )
+    if not devices:
+        print("  [FAIL] No devices matched the user set -- verify Netbios_Name0 alignment between users and devices tables")
+        sys.exit(1)
+
+    resource_ids = [rid for rid in (get_resource_id(r) for r in devices) if rid is not None]
+    filter_map = {
+        'resource_id': _ids_filter(resource_ids),
+        'netbios_name': _names_filter(user_netbios_names),
+    }
+
+    # Step 3: pull secondary tables via registry
+    clients = {'prod': prod_client, 'test': test_client}
+    pulled: Dict[str, Any] = {}
 
     for spec in TABLE_REGISTRY:
-        if args.local_users and spec.label == 'users':
-            continue  # already loaded from local file
         table_path = os.getenv(spec.env_var, '').strip()
         if not table_path:
             if spec.required:
@@ -508,21 +548,27 @@ def main() -> None:
             pulled[spec.label] = None
             continue
         wh = args.warehouse_test if spec.client_key == 'test' else args.warehouse_prod
-        data = pull_table(
-            clients[spec.client_key], table_path, wh, spec.label,
-            filter_sql=filter_map[spec.filter_type], timeout=args.timeout,
-        )
+        if spec.batched:
+            data = pull_table_batched(
+                clients[spec.client_key], table_path, wh, spec.label,
+                ids=resource_ids, timeout=args.timeout,
+            )
+        else:
+            data = pull_table(
+                clients[spec.client_key], table_path, wh, spec.label,
+                filter_sql=filter_map[spec.filter_type], timeout=args.timeout,
+            )
         pulled[spec.label] = data
         if not data:
             print(f"  [WARN] {spec.label} returned 0 rows")
 
-    # Step 3: merge (user-centric inner join)
+    # Step 4: merge (user-centric inner join)
     print("\nMerging (user-centric) ...")
     merged, dropped = merge(
         devices,
         pulled['windows_update'],
         pulled['installed_software'],
-        pulled['users'],
+        all_users,
         bitlocker=pulled.get('bitlocker'),
         screensaver=pulled.get('screensaver'),
         services=pulled.get('services'),
@@ -532,7 +578,7 @@ def main() -> None:
     if dropped:
         print(f"  [INFO] {dropped} device(s) had no matching user and were excluded.")
 
-    # Step 4: transform to Drata MDM format
+    # Step 5: transform to Drata MDM format
     print("Transforming to Drata MDM format ...")
     drata_payload = transform_all(merged)
     if args.test_mode:
@@ -541,14 +587,14 @@ def main() -> None:
     else:
         print(f"  {len(drata_payload)} records transformed.")
 
-    # Step 5: write output files
+    # Step 6: write output files
     write_json(merged, raw_path)
     print(f"\n[OK] Raw merged JSON  : {raw_path}")
 
     write_json(drata_payload, drata_path)
     print(f"[OK] Drata MDM JSON   : {drata_path}")
 
-    # Step 6: push to Drata API
+    # Step 7: push to Drata API
     api_key = os.getenv("DRATA_API_KEY", "").strip()
     connection_id = os.getenv("DRATA_CONNECTION_ID", "").strip()
 
