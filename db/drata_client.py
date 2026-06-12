@@ -83,9 +83,10 @@ class DrataClient:
         def _push(item: tuple) -> tuple:
             idx, record = item
             local_errors: List[Dict[str, Any]] = []
-            ok = self._push_one_record(url, record, idx + 1, total, local_errors)
+            ok = self._push_one_record(url, record, idx + 1, total, local_errors, quiet=True)
             return ok, local_errors
 
+        completed = 0
         with ThreadPoolExecutor(max_workers=_PUSH_WORKERS) as pool:
             futures = {pool.submit(_push, (i, r)): i for i, r in enumerate(records)}
             for fut in as_completed(futures):
@@ -94,6 +95,9 @@ class DrataClient:
                     if ok:
                         pushed_count += 1
                     errors.extend(local_errors)
+                    completed += 1
+                    if completed % 500 == 0 or completed == total:
+                        print(f"  ... {completed}/{total} pushed, {pushed_count} OK, {len(errors)} errors ...")
 
         return {'total': total, 'pushed': pushed_count, 'errors': errors}
 
@@ -104,13 +108,15 @@ class DrataClient:
         index: int,
         total: int,
         errors: List[Dict[str, Any]],
+        quiet: bool = False,
     ) -> bool:
         import requests
 
         pid    = record.get('personnelId', '(none)')
         alias  = record.get('alias', '(none)')
         ext_id = record.get('externalId', '(none)')
-        print(f"  [{index}/{total}] personnelId={pid}  alias={alias}  externalId={ext_id}")
+        if not quiet:
+            print(f"  [{index}/{total}] personnelId={pid}  alias={alias}  externalId={ext_id}")
 
         last_err = None
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -119,19 +125,19 @@ class DrataClient:
 
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get('Retry-After', _RETRY_DELAYS[min(attempt - 1, 1)]))
-                    print(f"    [RATE LIMIT] retrying in {retry_after}s ...")
+                    print(f"    [RATE LIMIT] personnelId={pid} retrying in {retry_after}s ...")
                     time.sleep(retry_after)
                     continue
 
                 if 400 <= resp.status_code < 500:
                     msg = f"HTTP {resp.status_code}: {resp.text}"
-                    print(f"    [FAIL] {msg}")
+                    print(f"    [FAIL] personnelId={pid}  alias={alias}  {msg}")
                     errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': msg})
                     return False
 
                 if resp.status_code >= 500:
                     body = resp.text
-                    print(f"    [5XX attempt {attempt}/{_MAX_RETRIES}] HTTP {resp.status_code}: {body}")
+                    print(f"    [5XX attempt {attempt}/{_MAX_RETRIES}] personnelId={pid}  HTTP {resp.status_code}: {body}")
                     last_err = f"HTTP {resp.status_code}: {body}"
                     if attempt < _MAX_RETRIES:
                         wait = _RETRY_DELAYS[attempt - 1]
@@ -139,17 +145,18 @@ class DrataClient:
                         time.sleep(wait)
                     continue
 
-                print(f"    [OK] HTTP {resp.status_code}")
+                if not quiet:
+                    print(f"    [OK] HTTP {resp.status_code}")
                 return True
 
             except Exception as e:
                 last_err = str(e)
                 if attempt < _MAX_RETRIES:
                     wait = _RETRY_DELAYS[attempt - 1]
-                    print(f"    [RETRY {attempt}/{_MAX_RETRIES}] {e} -- retrying in {wait}s ...")
+                    print(f"    [RETRY {attempt}/{_MAX_RETRIES}] personnelId={pid}  {e} -- retrying in {wait}s ...")
                     time.sleep(wait)
 
-        print(f"    [FAIL] all {_MAX_RETRIES} attempts exhausted: {last_err}")
+        print(f"    [FAIL] personnelId={pid}  alias={alias}  all {_MAX_RETRIES} attempts exhausted: {last_err}")
         errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': last_err})
         return False
 
@@ -157,24 +164,33 @@ class DrataClient:
         """
         Look up a single person in Drata by email address.
         Returns their employmentStatus string, or None if not found (404).
-        Retries up to _MAX_RETRIES times on transient network/timeout errors.
-        Raises on unexpected HTTP errors after all retries are exhausted.
+        Retries on 429 (rate limit), 5xx (server error), and transient network errors.
+        Raises after all retries are exhausted.
         """
         import requests
         from urllib.parse import quote
         encoded = quote(email, safe='')
         url = f"{_BASE_URL}/public/v2/personnel/email:{encoded}"
-        last_err = None
+        last_err: Exception = Exception(f"no attempts made for {email}")
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 resp = self._session.get(url, timeout=self._timeout)
                 if resp.status_code == 404:
                     return None
+                if resp.status_code == 429:
+                    wait = int(resp.headers.get('Retry-After', _RETRY_DELAYS[min(attempt - 1, 1)]))
+                    time.sleep(wait)
+                    last_err = Exception(f"HTTP 429 rate limited")
+                    continue
+                if resp.status_code >= 500:
+                    last_err = Exception(f"HTTP {resp.status_code}")
+                    if attempt < _MAX_RETRIES:
+                        time.sleep(_RETRY_DELAYS[attempt - 1])
+                    continue
                 resp.raise_for_status()
                 return resp.json().get('employmentStatus')
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
                 last_err = e
                 if attempt < _MAX_RETRIES:
-                    wait = _RETRY_DELAYS[attempt - 1]
-                    time.sleep(wait)
+                    time.sleep(_RETRY_DELAYS[attempt - 1])
         raise last_err

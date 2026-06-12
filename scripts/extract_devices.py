@@ -698,10 +698,10 @@ def main() -> None:
     # Step 7: push to Drata API
     # Filter records with no usable personnelId before pushing -- sending null to Drata
     # guarantees a 400; skip locally and log so the run doesn't burn retries on bad data.
-    valid_payload = [r for r in all_drata if r.get('personnelId')]
+    valid_payload = [r for r in all_drata if (r.get('personnelId') or '').strip()]
     no_pid = len(all_drata) - len(valid_payload)
     if no_pid:
-        print(f"  [WARN] {no_pid} record(s) skipped -- personnelId is null (UPN empty in source).")
+        print(f"  [WARN] {no_pid} record(s) skipped -- personnelId is null or empty (UPN missing in source).")
 
     if args.dry_run:
         print(f"\n[DRY RUN] Would push {len(valid_payload)} records to Drata (skipped).\n")
