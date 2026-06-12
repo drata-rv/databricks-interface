@@ -189,8 +189,13 @@ def run_sql(
     return {"columns": columns, "rows": all_rows, "state": state.value}
 
 
+_CSV_NULL = frozenset({'null', 'NULL', 'Null'})
+
+
 def rows_to_records(
     columns: List[str],
     rows: List[List[Any]],
 ) -> List[Dict[str, Any]]:
-    return [dict(zip(columns, row)) for row in rows]
+    def _clean(v: Any) -> Any:
+        return None if isinstance(v, str) and v in _CSV_NULL else v
+    return [dict(zip(columns, (_clean(v) for v in row))) for row in rows]
