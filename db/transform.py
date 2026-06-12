@@ -102,7 +102,7 @@ def _build_app_list(software: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             seen.add(key)
             result.append({
                 'name': name,
-                'version': app.get('product_version_0'),
+                'version': app.get('product_version_0') or '',
                 'description': name,
             })
     return result
