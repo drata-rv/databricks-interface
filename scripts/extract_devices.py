@@ -51,7 +51,7 @@ _MAX_RETRIES = 3
 DEVICE_NAME_PREFIXES = ('NW', 'GI')
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
 _SW_BATCH_SIZE = 200
-_PERSONNEL_CHECK_WORKERS = 20
+_PERSONNEL_CHECK_WORKERS = 5
 _PIPELINE_CHUNK_SIZE = 500
 
 
@@ -548,27 +548,33 @@ def main() -> None:
         sandbox_flag = args.sandbox
 
         def _check_one(u):
-            email = (u.get(upn_key) or u.get('User_Principal_Name0') or '').lower()
-            if not email or '@' not in email:
-                return u, None
-            lookup = email
-            if sandbox_flag and '@nationwide.com' in email:
-                lookup = email.replace('@nationwide.com', '@sandbox.nationwide.com')
-            return u, drata_pre.get_person_status(lookup)
+            try:
+                email = (u.get(upn_key) or u.get('User_Principal_Name0') or '').lower()
+                if not email or '@' not in email:
+                    return u, None
+                lookup = email
+                if sandbox_flag and '@nationwide.com' in email:
+                    lookup = email.replace('@nationwide.com', '@sandbox.nationwide.com')
+                return u, drata_pre.get_person_status(lookup)
+            except Exception:
+                return u, '__error__'
 
         filtered = []
+        check_errors = 0
         print(f"Checking {before} user(s) against Drata personnel status ({_PERSONNEL_CHECK_WORKERS} workers) ...")
         with ThreadPoolExecutor(max_workers=_PERSONNEL_CHECK_WORKERS) as pool:
             futures = {pool.submit(_check_one, u): u for u in all_users}
             for i, fut in enumerate(_as_completed(futures), 1):
                 u, status = fut.result()
-                if status in _active:
+                if status == '__error__':
+                    check_errors += 1
+                elif status in _active:
                     filtered.append(u)
                 if i % 500 == 0:
                     print(f"  ... {i}/{before} checked, {len(filtered)} active ...")
         all_users = filtered
-        skipped = before - len(all_users)
-        print(f"  Personnel filter: {len(all_users)} active / {skipped} excluded (former, not found, or no UPN).")
+        skipped = before - len(all_users) - check_errors
+        print(f"  Personnel filter: {len(all_users)} active / {skipped} excluded (former/not found) / {check_errors} API errors (excluded).")
     else:
         print("  [WARN] DRATA_API_KEY not set -- personnel filter skipped, all users will be processed.")
 

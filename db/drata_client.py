@@ -157,13 +157,24 @@ class DrataClient:
         """
         Look up a single person in Drata by email address.
         Returns their employmentStatus string, or None if not found (404).
-        Raises on unexpected HTTP errors.
+        Retries up to _MAX_RETRIES times on transient network/timeout errors.
+        Raises on unexpected HTTP errors after all retries are exhausted.
         """
+        import requests
         from urllib.parse import quote
         encoded = quote(email, safe='')
         url = f"{_BASE_URL}/public/v2/personnel/email:{encoded}"
-        resp = self._session.get(url, timeout=self._timeout)
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return resp.json().get('employmentStatus')
+        last_err = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                resp = self._session.get(url, timeout=self._timeout)
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                return resp.json().get('employmentStatus')
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_err = e
+                if attempt < _MAX_RETRIES:
+                    wait = _RETRY_DELAYS[attempt - 1]
+                    time.sleep(wait)
+        raise last_err
