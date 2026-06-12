@@ -57,6 +57,7 @@ class DrataClient:
         errors is a list of {'batch': int, 'error': str} for failed batches.
         """
         url = f"{_BASE_URL}{_PUSH_PATH}/{self._connection_id}"
+        print(f"  [DRATA] POST {url}")
         errors: List[Dict[str, Any]] = []
         batches = 0
         for i in range(0, len(records), _BATCH_SIZE):
