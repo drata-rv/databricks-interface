@@ -27,3 +27,6 @@ output/
 
 # OS
 .DS_Store
+
+# Nationwide source artifacts -- not committed
+*.csv
