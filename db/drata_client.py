@@ -89,18 +89,26 @@ class DrataClient:
                     errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': msg})
                     return False
 
-                resp.raise_for_status()
+                if resp.status_code >= 500:
+                    body = resp.text
+                    print(f"    [5XX attempt {attempt}/{_MAX_RETRIES}] HTTP {resp.status_code}: {body}")
+                    last_err = f"HTTP {resp.status_code}: {body}"
+                    if attempt < _MAX_RETRIES:
+                        wait = _RETRY_DELAYS[attempt - 1]
+                        print(f"    retrying in {wait}s ...")
+                        time.sleep(wait)
+                    continue
+
                 print(f"    [OK] HTTP {resp.status_code}")
                 return True
 
             except Exception as e:
-                last_err = e
+                last_err = str(e)
                 if attempt < _MAX_RETRIES:
                     wait = _RETRY_DELAYS[attempt - 1]
                     print(f"    [RETRY {attempt}/{_MAX_RETRIES}] {e} -- retrying in {wait}s ...")
                     time.sleep(wait)
 
-        msg = str(last_err)
-        print(f"    [FAIL] all {_MAX_RETRIES} attempts exhausted: {msg}")
+        print(f"    [FAIL] all {_MAX_RETRIES} attempts exhausted: {last_err}")
         errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': msg})
         return False
