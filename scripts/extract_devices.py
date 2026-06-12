@@ -401,9 +401,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help=(
-            "Pull 5 real identities and push them to Drata with all 5 monitoring fields "
-            "forced to a passing state. Uses real personnelId/alias/externalId so records "
-            "land on actual users. Intended for verifying the Drata connection end-to-end."
+            "Push real identities to Drata with all 5 monitoring fields forced to a passing "
+            "state. Uses real personnelId/alias/externalId so records land on actual users. "
+            "Combine with --limit to control how many are processed. "
+            "Intended for verifying the Drata connection end-to-end."
         ),
     )
     parser.add_argument(
@@ -449,9 +450,6 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
-    if args.test_mode:
-        args.limit = 5
-
     prod_client = get_client_for(host=args.host_prod, token=args.token_prod)
     test_client = get_client_for(host=args.host_test, token=args.token_test)
     default_raw, default_drata = default_output_paths(test_mode=args.test_mode)
@@ -469,7 +467,7 @@ def main() -> None:
     if args.local_users:
         print(f"Users source     : LOCAL FILE ({_LOCAL_USERS_FILE})")
     if args.test_mode:
-        print(f"Mode             : TEST MODE (5 real identities, all 5 fields forced passing)")
+        print(f"Mode             : TEST MODE (all 5 monitoring fields forced passing)")
     if args.dry_run:
         print(f"Mode             : DRY RUN (Drata push skipped)")
 
