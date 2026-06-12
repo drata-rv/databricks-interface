@@ -607,6 +607,14 @@ def main() -> None:
     api_key = os.getenv("DRATA_API_KEY", "").strip()
     connection_id = os.getenv("DRATA_CONNECTION_ID", "").strip()
 
+    # Filter records with no usable personnelId before pushing -- sending null to Drata
+    # guarantees a 400; skip locally and log so the run doesn't burn retries on bad data.
+    valid_payload = [r for r in drata_payload if r.get('personnelId')]
+    no_pid = len(drata_payload) - len(valid_payload)
+    if no_pid:
+        print(f"  [WARN] {no_pid} record(s) skipped -- personnelId is null (UPN empty in source).")
+    drata_payload = valid_payload
+
     if args.dry_run:
         print(f"\n[DRY RUN] Would push {len(drata_payload)} records to Drata (skipped).\n")
     elif not api_key or not connection_id:

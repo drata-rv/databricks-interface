@@ -128,12 +128,13 @@ def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
     value = (
         user.get('User_Princiipal_Name0')   # actual column name in source (double-i typo)
         or user.get('User_Principal_Name0') # fallback if typo is corrected
-        or user.get('Unique_User_Name0')    # last resort: domain\username
         or None
+        # Unique_User_Name0 is domain\username (e.g. NATIONWIDE\BONKB6) -- not a valid
+        # Drata personnelId format, so we don't use it here.
     )
     if value and '@' in value:
         return f"email:{value}"
-    return value
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +294,9 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
         'alias': device.get('Name0') or device.get('Netbios_Name0'),
         'externalId': (
             device.get('AADDeviceID')
-            or user.get('Unique_User_Name0')
             or str(features.get('resource_id'))
+            # Unique_User_Name0 is a user attribute, not device-specific -- using it
+            # would give the same externalId to all devices belonging to one user.
         ),
         'serialNumber': device.get('SerialNumber'),
         'model': device.get('CPUType0'),
