@@ -113,10 +113,14 @@ class DrataClient:
         errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': last_err})
         return False
 
-    def fetch_current_personnel_emails(self, statuses=None):
+    def fetch_current_personnel_emails(self, statuses=None, max_records=None):
         """
         Fetch email addresses for all active Drata personnel.
         Returns a frozenset of lowercase email strings.
+
+        max_records caps how many personnel records are fetched. When set, the
+        filter is partial -- it only covers the first max_records entries returned
+        by the API. For a complete filter use the personnel cache (--refresh-personnel).
         """
         if statuses is None:
             statuses = ['CURRENT_EMPLOYEE', 'CURRENT_CONTRACTOR']
@@ -140,6 +144,10 @@ class DrataClient:
                     emails.add(email.lower())
             cursor = body.get('pagination', {}).get('cursor')
             print(f"  Page {page}: {len(body.get('data', []))} personnel, {len(emails)} emails so far ...")
+            if max_records and len(emails) >= max_records:
+                print(f"  [CAP] Personnel fetch stopped at {len(emails)} (max_records={max_records}).")
+                print(f"        Filter is partial -- run with --refresh-personnel for a complete roster.")
+                break
             if not cursor:
                 break
         return frozenset(emails)

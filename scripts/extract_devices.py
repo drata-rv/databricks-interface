@@ -419,6 +419,17 @@ def parse_args() -> argparse.Namespace:
         help="Run the full pipeline but skip the Drata API push. Output files are still written.",
     )
     parser.add_argument(
+        "--refresh-personnel",
+        action="store_true",
+        default=False,
+        help=(
+            "Fetch the full Drata current-personnel roster and write it to "
+            "output/personnel_cache.json, then use it to filter this run. "
+            "Without this flag, the personnel fetch is capped at --limit records "
+            "(partial filter). Use this flag periodically to keep the cache current."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         default=False,
@@ -498,16 +509,32 @@ def main() -> None:
     else:
         print()
 
-    # Step 0: fetch current Drata personnel to scope the run
+    # Step 0: load current Drata personnel to scope the run
+    _PERSONNEL_CACHE = Path("output") / "personnel_cache.json"
     api_key = os.getenv("DRATA_API_KEY", "").strip()
     connection_id = os.getenv("DRATA_CONNECTION_ID", "").strip()
     current_emails = None  # None means no filter applied
     if api_key:
         from db.drata_client import DrataClient
-        print("Fetching current personnel from Drata ...")
-        drata_pre = DrataClient(api_key=api_key, connection_id=connection_id)
-        current_emails = drata_pre.fetch_current_personnel_emails()
-        print(f"  {len(current_emails)} current employees/contractors found in Drata.")
+        if not args.refresh_personnel and _PERSONNEL_CACHE.exists():
+            print(f"Loading personnel from cache ({_PERSONNEL_CACHE}) ...")
+            with open(_PERSONNEL_CACHE, encoding="utf-8") as _f:
+                current_emails = frozenset(json.load(_f))
+            print(f"  {len(current_emails)} current employees/contractors (cached).")
+        else:
+            drata_pre = DrataClient(api_key=api_key, connection_id=connection_id)
+            if args.refresh_personnel:
+                print("Fetching full Drata personnel roster (--refresh-personnel) ...")
+                current_emails = drata_pre.fetch_current_personnel_emails()
+                _PERSONNEL_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                with open(_PERSONNEL_CACHE, "w", encoding="utf-8") as _f:
+                    json.dump(sorted(current_emails), _f)
+                print(f"  {len(current_emails)} current employees/contractors fetched and cached.")
+            else:
+                print(f"Fetching Drata personnel (capped at --limit={args.limit}) ...")
+                print(f"  For a complete filter run once with --refresh-personnel.")
+                current_emails = drata_pre.fetch_current_personnel_emails(max_records=args.limit)
+                print(f"  {len(current_emails)} personnel fetched (partial -- cap={args.limit}).")
     else:
         print("  [WARN] DRATA_API_KEY not set -- personnel filter skipped, all users will be processed.")
 
