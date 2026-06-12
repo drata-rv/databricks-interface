@@ -30,3 +30,4 @@ output/
 
 # Nationwide source artifacts -- not committed
 *.csv
+*.xlsx

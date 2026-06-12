@@ -258,6 +258,27 @@ def write_json(payload: List[Dict[str, Any]], output_path: Path) -> None:
         json.dump(payload, f, indent=2, default=str)
 
 
+_LOCAL_USERS_FILE = "SCCM Employees with Devices - Sandbox.xlsx"
+
+
+def load_users_from_xlsx(path: str, netbios_filter: set) -> List[Dict[str, Any]]:
+    """
+    Load user records from a local xlsx file, scoped to the set of machine names
+    pulled from Databricks. Mirrors the IN-clause scoping applied to the Databricks pull.
+    """
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+    records = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        record = {k: v for k, v in zip(headers, row) if k is not None}
+        if record.get('Netbios_Name0') in netbios_filter:
+            records.append(record)
+    wb.close()
+    return records
+
+
 def default_output_paths(test_mode: bool = False) -> Tuple[Path, Path]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     tag = "_test" if test_mode else ""
@@ -342,6 +363,16 @@ def parse_args() -> argparse.Namespace:
         help="Path for the Drata-formatted JSON. Defaults to output/devices_<timestamp>_drata.json.",
     )
     parser.add_argument(
+        "--local-users",
+        action="store_true",
+        default=False,
+        help=(
+            f"Load the users table from the local xlsx file ({_LOCAL_USERS_FILE}) "
+            "instead of pulling from Databricks. Bypasses DATABRICKS_TABLE_USERS. "
+            "Records are scoped to the machine names returned by the devices pull."
+        ),
+    )
+    parser.add_argument(
         "--test-mode",
         action="store_true",
         default=False,
@@ -405,6 +436,8 @@ def main() -> None:
     print(f"Query timeout    : {args.timeout}s per table")
     print(f"Output (raw)     : {raw_path}")
     print(f"Output (drata)   : {drata_path}")
+    if args.local_users:
+        print(f"Users source     : LOCAL FILE ({_LOCAL_USERS_FILE})")
     if args.test_mode:
         print(f"Mode             : TEST MODE (5 real identities, all 5 fields forced passing)")
     if args.dry_run:
@@ -428,6 +461,9 @@ def main() -> None:
         print(f"DRATA_API_KEY                    : {'(set)' if os.getenv('DRATA_API_KEY') else '(not set)'}")
         print(f"DRATA_CONNECTION_ID              : {os.getenv('DRATA_CONNECTION_ID', '(not set)')}")
         print(f"~/.databrickscfg exists          : {databrickscfg.exists()}")
+        if args.local_users:
+            xlsx_exists = Path(_LOCAL_USERS_FILE).exists()
+            print(f"LOCAL_USERS_FILE                 : {_LOCAL_USERS_FILE}  ({'found' if xlsx_exists else 'NOT FOUND'})")
         print(f"-- END DEBUG --\n")
     else:
         print()
@@ -450,7 +486,20 @@ def main() -> None:
     clients = {'prod': prod_client, 'test': test_client}
     pulled: Dict[str, Any] = {}
 
+    # Pre-load users from local xlsx when --local-users is set, bypassing Databricks
+    if args.local_users:
+        if not Path(_LOCAL_USERS_FILE).exists():
+            print(f"  [FAIL] Local users file not found: {_LOCAL_USERS_FILE}")
+            sys.exit(1)
+        print(f"  [LOCAL] Loading users from {_LOCAL_USERS_FILE} ...")
+        pulled['users'] = load_users_from_xlsx(_LOCAL_USERS_FILE, netbios_filter=set(netbios_names))
+        print(f"  {len(pulled['users'])} user records matched from local file.")
+        if not pulled['users']:
+            print("  [WARN] No users matched -- verify Netbios_Name0 values in the xlsx align with the devices pull.")
+
     for spec in TABLE_REGISTRY:
+        if args.local_users and spec.label == 'users':
+            continue  # already loaded from local file
         table_path = os.getenv(spec.env_var, '').strip()
         if not table_path:
             if spec.required:
