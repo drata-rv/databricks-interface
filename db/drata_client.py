@@ -28,7 +28,7 @@ _BASE_URL = "https://public-api.drata.com"
 
 # Endpoint for the Custom Device Connection batch push.
 # Verify this path from the Drata OpenAPI spec before first use.
-_PUSH_PATH = "/v2/devices/custom-connections"
+_PUSH_PATH = "/public/v2/custom-connections/{connection_id}/devices"
 
 
 class DrataClient:
@@ -56,7 +56,7 @@ class DrataClient:
         Returns a summary dict: {'total': int, 'batches': int, 'errors': list}.
         errors is a list of {'batch': int, 'error': str} for failed batches.
         """
-        url = f"{_BASE_URL}{_PUSH_PATH}/{self._connection_id}"
+        url = f"{_BASE_URL}{_PUSH_PATH.format(connection_id=self._connection_id)}"
         errors: List[Dict[str, Any]] = []
         batches = 0
         for i in range(0, len(records), _BATCH_SIZE):
