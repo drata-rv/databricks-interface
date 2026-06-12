@@ -120,16 +120,21 @@ def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
     """
     Extract the user's email from the user identity record for use as personnelId.
 
+    Drata requires the format 'email:<emailAddress>' for email-based personnelId values.
+
     Column name note: the source table has a typo -- 'User_Princiipal_Name0' (double-i).
     We try the typo'd spelling first, then the correct spelling as a fallback in case
     Nationwide corrects it in a future schema update.
     """
-    return (
+    value = (
         user.get('User_Princiipal_Name0')   # actual column name in source (double-i typo)
         or user.get('User_Principal_Name0') # fallback if typo is corrected
         or user.get('Unique_User_Name0')    # last resort: domain\username
         or None
     )
+    if value and '@' in value:
+        return f"email:{value}"
+    return value
 
 
 # ---------------------------------------------------------------------------
