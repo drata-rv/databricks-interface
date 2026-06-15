@@ -96,13 +96,13 @@ def _build_app_list(software: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         name = app.get('product_name_0')
         if not name:
             continue
-        version = app.get('product_version_0') or ''
+        version = app.get('product_version_0') or 'Unknown'
         key = (name, version)
         if key not in seen:
             seen.add(key)
             result.append({
                 'name': name,
-                'version': app.get('product_version_0') or '',
+                'version': version,
                 'description': name,
             })
     return result
