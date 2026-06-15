@@ -472,6 +472,7 @@ def main() -> None:
     default_raw, default_drata = default_output_paths(test_mode=args.test_mode)
     raw_path = Path(args.output_raw) if args.output_raw else default_raw
     drata_path = Path(args.output_drata) if args.output_drata else default_drata
+    rejected_path = drata_path.parent / drata_path.name.replace('_drata.json', '_rejected.json')
 
     print(f"\nProd workspace   : {args.host_prod}")
     print(f"Test workspace   : {args.host_test}")
@@ -704,12 +705,39 @@ def main() -> None:
     print(f"[OK] Drata MDM JSON   : {drata_path}")
 
     # Step 7: push to Drata API
-    # Filter records with no usable personnelId before pushing -- sending null to Drata
-    # guarantees a 400; skip locally and log so the run doesn't burn retries on bad data.
+    # Each filter below removes records that cannot be safely pushed and logs them to
+    # the rejected file so data quality gaps are visible without polluting the push run.
+    rejected: List[Dict[str, Any]] = []
+
+    # No personnelId -- cannot link device to a person in Drata
+    no_pid_records = [r for r in all_drata if not (r.get('personnelId') or '').strip()]
+    for r in no_pid_records:
+        rejected.append({**r, 'rejection_reason': 'missing_personnelId'})
     valid_payload = [r for r in all_drata if (r.get('personnelId') or '').strip()]
-    no_pid = len(all_drata) - len(valid_payload)
-    if no_pid:
-        print(f"  [WARN] {no_pid} record(s) skipped -- personnelId is null or empty (UPN missing in source).")
+    if no_pid_records:
+        print(f"  [WARN] {len(no_pid_records)} record(s) excluded -- personnelId null or empty (UPN missing in source).")
+
+    # No appList -- SCCM has no software inventory for this device; pushing an empty list
+    # is a data quality issue, not a real device state.
+    no_applist_records = [r for r in valid_payload if not r.get('appList')]
+    for r in no_applist_records:
+        rejected.append({**r, 'rejection_reason': 'empty_applist'})
+    valid_payload = [r for r in valid_payload if r.get('appList')]
+    if no_applist_records:
+        print(f"  [WARN] {len(no_applist_records)} record(s) excluded -- appList empty (no software inventory in SCCM).")
+
+    # No externalId -- Drata uses externalId as a upsert key; without it a device cannot
+    # be matched on subsequent runs and creates duplicate orphaned records.
+    no_extid_records = [r for r in valid_payload if not r.get('externalId') or r.get('externalId') == 'None']
+    for r in no_extid_records:
+        rejected.append({**r, 'rejection_reason': 'missing_externalId'})
+    valid_payload = [r for r in valid_payload if r.get('externalId') and r.get('externalId') != 'None']
+    if no_extid_records:
+        print(f"  [WARN] {len(no_extid_records)} record(s) excluded -- externalId null (AADDeviceID and resource_id both missing).")
+
+    if rejected:
+        write_json(rejected, rejected_path)
+        print(f"  [WARN] {len(rejected)} total record(s) rejected -- see {rejected_path}")
 
     if args.dry_run:
         print(f"\n[DRY RUN] Would push {len(valid_payload)} records to Drata (skipped).\n")

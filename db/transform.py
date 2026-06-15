@@ -294,7 +294,7 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
         'alias': device.get('Name0') or device.get('Netbios_Name0'),
         'externalId': (
             device.get('AADDeviceID')
-            or str(features.get('resource_id'))
+            or (str(features['resource_id']) if features.get('resource_id') is not None else None)
         ),
         'serialNumber': device.get('SerialNumber'),
         'model': device.get('CPUType0'),
