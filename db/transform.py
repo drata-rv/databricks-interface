@@ -295,14 +295,12 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
         'externalId': (
             device.get('AADDeviceID')
             or str(features.get('resource_id'))
-            # Unique_User_Name0 is a user attribute, not device-specific -- using it
-            # would give the same externalId to all devices belonging to one user.
         ),
         'serialNumber': device.get('SerialNumber'),
         'model': device.get('CPUType0'),
         'macAddress': features['mac_address'],
         'platformName': _platform_name(device.get('Operating_System_Name_and0')),
-        'platformVersion': device.get('Build01') or device.get('BuildExt') or '',
+        'platformVersion': device.get('Build01') or device.get('BuildExt') or 'Unknown',
         'antivirusEnabled': features['av_enabled'],
         'antivirusExplanation': {'antivirusApps': features['av_apps']},
         'appList': features['app_list'],
