@@ -301,11 +301,11 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'personnelId': _resolve_personnel_id(user),
         'serialNumber': device.get('SerialNumber') or device.get('serial_number'),
-        'alias': device.get('SerialNumber') or device.get('serial_number') or device.get('Name0') or device.get('Netbios_Name0'),
-        'externalId': (
-            device.get('AADDeviceID')
-            or (str(features['resource_id']) if features.get('resource_id') is not None else None)
+        'alias': (
+            device.get('Netbios_Name0') or device.get('Name0')
+            or device.get('netbios_name0') or device.get('name0')
         ),
+        'externalId': device.get('SerialNumber') or device.get('serial_number'),
         'model': device.get('CPUType0'),
         'macAddress': features['mac_address'],
         'platformName': _platform_name(device.get('Operating_System_Name_and0')),

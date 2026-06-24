@@ -785,7 +785,7 @@ def main() -> None:
         rejected.append({**r, 'rejection_reason': 'missing_externalId'})
     valid_payload = [r for r in valid_payload if r.get('externalId') and r.get('externalId') != 'None']
     if no_extid_records:
-        print(f"  [WARN] {len(no_extid_records)} record(s) excluded -- externalId null (AADDeviceID and resource_id both missing).")
+        print(f"  [WARN] {len(no_extid_records)} record(s) excluded -- externalId null (serial number missing in SCCM).")
 
     if rejected:
         write_json(rejected, rejected_path)
