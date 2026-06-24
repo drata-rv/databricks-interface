@@ -121,13 +121,14 @@ def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
 
     Drata requires the format 'email:<emailAddress>' for email-based personnelId values.
 
-    Column name note: the source table has a typo -- 'User_Princiipal_Name0' (double-i).
-    We try the typo'd spelling first, then the correct spelling as a fallback in case
-    Nationwide corrects it in a future schema update.
+    Column name note: xlsx source has a typo ('User_Princiipal_Name0', double-i).
+    Databricks t_sccm_r_user uses snake_case ('user_principal_name0').
+    All three variants are tried in order.
     """
     value = (
-        user.get('User_Princiipal_Name0')   # actual column name in source (double-i typo)
-        or user.get('User_Principal_Name0') # fallback if typo is corrected
+        user.get('User_Princiipal_Name0')   # xlsx: double-i typo in source column
+        or user.get('User_Principal_Name0') # xlsx: correct spelling fallback
+        or user.get('user_principal_name0') # Databricks t_sccm_r_user (snake_case)
         or None
         # Unique_User_Name0 is domain\username (e.g. NATIONWIDE\BONKB6) -- not a valid
         # Drata personnelId format, so we don't use it here.

@@ -117,6 +117,24 @@ def _names_filter(names: List[str], column: str = "Netbios_Name0") -> str:
     return f"{column} IN ({escaped})"
 
 
+def _user_device_filter(usernames: List[str]) -> str:
+    """SQL filter for devices scoped to a set of usernames, excluding servers and shared machines.
+
+    Exclusion logic:
+      is_assigned_to_user0 = TRUE  -- SCCM flag; only present in t_sccm_r_system (test catalog);
+                                      remove this clause if the prod devices table lacks the column.
+      operating_system_name_and0 NOT LIKE '%Server%'  -- belt-and-suspenders OS check.
+    """
+    if not usernames:
+        return "1=0"
+    name_filter = _names_filter(usernames, column="user_name0")
+    return (
+        f"{name_filter}"
+        f" AND (is_assigned_to_user0 = TRUE OR is_assigned_to_user0 IS NULL)"
+        f" AND (operating_system_name_and0 NOT LIKE '%Server%' OR operating_system_name_and0 IS NULL)"
+    )
+
+
 def pull_table(
     client: Any,
     table: str,
@@ -202,12 +220,19 @@ def merge(
     Returns (records, dropped_count) where dropped_count is the number of devices
     that had no matching user entry.
     """
-    # Index devices by machine name
-    device_index: Dict[str, Dict[str, Any]] = {}
+    # Build dual device indexes to support both join strategies:
+    #   Netbios join  -- xlsx path (users have Netbios_Name0)
+    #   Username join -- Databricks path (users have user_name0 + windows_nt_domain0)
+    device_by_netbios: Dict[str, Dict[str, Any]] = {}
+    device_by_username: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for dev in devices:
         netbios = dev.get('Netbios_Name0') or dev.get('Name0')
         if netbios:
-            device_index[netbios] = dev
+            device_by_netbios[netbios] = dev
+        uname = (dev.get('user_name0') or dev.get('User_Name0') or '').strip().lower()
+        udomain = (dev.get('user_domain0') or dev.get('User_Domain0') or '').strip().lower()
+        if uname:
+            device_by_username[(uname, udomain)] = dev
 
     # Index resource_id-keyed tables
     wu_index: Dict[int, Dict[str, Any]] = {}
@@ -257,18 +282,28 @@ def merge(
             if rid is not None:
                 network_adapter_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
 
-    # User-centric iteration: users anchor the output set
-    matched_netbios: set = set()
+    # User-centric iteration: users anchor the output set.
+    # Try Netbios join first (xlsx path), fall back to username+domain join (Databricks path).
+    matched_device_ids: set = set()
     output: List[Dict[str, Any]] = []
     for row in users:
         netbios = row.get('Netbios_Name0') or row.get('netbios_name0')
-        if not netbios or netbios not in device_index:
+        if netbios and netbios in device_by_netbios:
+            device = device_by_netbios[netbios]
+        else:
+            uname = (row.get('user_name0') or '').strip().lower()
+            udomain = (row.get('windows_nt_domain0') or '').strip().lower()
+            device = device_by_username.get((uname, udomain)) if uname else None
+        if not device:
             continue
-        device = device_index[netbios]
-        matched_netbios.add(netbios)
         rid = get_resource_id(device)
+        device_key = rid if rid is not None else (
+            device.get('Netbios_Name0') or device.get('Name0') or device.get('netbios_name0')
+        )
+        matched_device_ids.add(device_key)
         if rid is None:
-            print(f"  [WARN] merge: device {netbios!r} has no parseable resource_id -- software/WU data will be empty.")
+            label = device.get('Netbios_Name0') or device.get('Name0') or device.get('netbios_name0') or '?'
+            print(f"  [WARN] merge: device {label!r} has no parseable resource_id -- software/WU data will be empty.")
         user_fields = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
         device_fields = {k: v for k, v in device.items() if k not in ("resource_id", "ResourceID", "ResourceType")}
         output.append({
@@ -283,7 +318,7 @@ def merge(
             "network_adapter": network_adapter_index.get(rid) if network_adapter_index is not None else None,
         })
 
-    dropped = len(devices) - len(matched_netbios)
+    dropped = len(devices) - len(matched_device_ids)
     return output, dropped
 
 
@@ -501,6 +536,7 @@ def main() -> None:
         print(f"DATABRICKS_WAREHOUSE_ID          : {os.getenv('DATABRICKS_WAREHOUSE_ID', '(not set)')}")
         print(f"DATABRICKS_WAREHOUSE_ID_TEST     : {os.getenv('DATABRICKS_WAREHOUSE_ID_TEST', '(not set)')}")
         print(f"DATABRICKS_TABLE_DEVICES         : {os.getenv('DATABRICKS_TABLE_DEVICES', '(not set)')}")
+        print(f"DATABRICKS_TABLE_USERS           : {os.getenv('DATABRICKS_TABLE_USERS', '(not set)')}")
         for spec in TABLE_REGISTRY:
             val = os.getenv(spec.env_var, '(not set)')
             req = 'required' if spec.required else 'optional'
@@ -545,14 +581,18 @@ def main() -> None:
         from db.drata_client import DrataClient
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
         drata_pre = DrataClient(api_key=api_key, connection_id=connection_id)
-        upn_key = 'User_Princiipal_Name0'  # double-i typo in source
         _active = {'CURRENT_EMPLOYEE', 'CURRENT_CONTRACTOR'}
         before = len(all_users)
         sandbox_flag = args.sandbox
 
         def _check_one(u):
             try:
-                email = (u.get(upn_key) or u.get('User_Principal_Name0') or '').lower()
+                email = (
+                    u.get('User_Princiipal_Name0')   # xlsx: double-i typo
+                    or u.get('User_Principal_Name0') # xlsx: correct spelling
+                    or u.get('user_principal_name0') # Databricks t_sccm_r_user
+                    or ''
+                ).lower()
                 if not email or '@' not in email:
                     return u, None
                 lookup = email
@@ -598,19 +638,28 @@ def main() -> None:
         if len(chunks) > 1:
             print(f"\n--- Chunk {chunk_num}/{len(chunks)} ({len(chunk)} users) ---")
 
-        chunk_names = [u.get("Netbios_Name0") or u.get("netbios_name0") for u in chunk]
-        chunk_names = [n for n in chunk_names if n]
+        # Step 2: pull devices scoped to this chunk.
+        # xlsx path: join key is Netbios_Name0 (pre-joined in the spreadsheet).
+        # Databricks path: join key is user_name0 + domain; server/shared exclusion applied at SQL level.
+        if args.local_users:
+            chunk_names = [u.get("Netbios_Name0") or u.get("netbios_name0") for u in chunk]
+            chunk_names = [n for n in chunk_names if n]
+            device_filter = _names_filter(chunk_names)
+            print(f"  Pulling devices scoped to {len(chunk_names)} machine names (Netbios_Name0) ...")
+        else:
+            chunk_names = [u.get("user_name0") for u in chunk]
+            chunk_names = [n for n in chunk_names if n]
+            device_filter = _user_device_filter(chunk_names)
+            print(f"  Pulling devices scoped to {len(chunk_names)} usernames (user_name0, excluding servers/shared) ...")
 
-        # Step 2: pull devices scoped to this chunk
-        print(f"  Pulling devices scoped to {len(chunk_names)} user machine names ...")
         devices = pull_table(
             prod_client, args.devices, args.warehouse_prod, "devices",
-            filter_sql=_names_filter(chunk_names),
+            filter_sql=device_filter,
             timeout=args.timeout,
         )
         if not devices:
             if chunk_num == 1 and len(chunks) == 1:
-                print("  [FAIL] No devices matched the user set -- verify Netbios_Name0 alignment between users and devices tables")
+                print("  [FAIL] No devices matched the user set -- verify join key alignment (Netbios_Name0 for xlsx, user_name0 for Databricks)")
                 sys.exit(1)
             print(f"  [WARN] Chunk {chunk_num}: no devices matched -- skipping.")
             continue
