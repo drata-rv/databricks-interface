@@ -670,7 +670,7 @@ def main() -> None:
         before_prefix = len(devices)
         devices = [
             d for d in devices
-            if (d.get('Netbios_Name0') or d.get('Name0') or '').upper().startswith(DEVICE_NAME_PREFIXES)
+            if (d.get('Netbios_Name0') or d.get('Name0') or d.get('netbios_name0') or d.get('name0') or '').upper().startswith(DEVICE_NAME_PREFIXES)
         ]
         dropped_prefix = before_prefix - len(devices)
         if dropped_prefix:
