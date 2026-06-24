@@ -118,12 +118,11 @@ def _names_filter(names: List[str], column: str = "Netbios_Name0") -> str:
 
 
 def _user_device_filter(usernames: List[str]) -> str:
-    """SQL filter for devices scoped to a set of usernames, excluding servers and shared machines.
+    """SQL filter for devices scoped to a set of usernames, excluding non-compliant device types.
 
-    Exclusion logic:
-      is_assigned_to_user0 = TRUE  -- SCCM flag; only present in t_sccm_r_system (test catalog);
-                                      remove this clause if the prod devices table lacks the column.
-      operating_system_name_and0 NOT LIKE '%Server%'  -- belt-and-suspenders OS check.
+    All column references are from t_sccm_r_system (test catalog). If the configured
+    devices table lacks any of these columns, the query will error -- remove that clause.
+    IS NULL fallbacks include devices where the field was not backfilled.
     """
     if not usernames:
         return "1=0"
@@ -131,6 +130,10 @@ def _user_device_filter(usernames: List[str]) -> str:
     return (
         f"{name_filter}"
         f" AND (is_assigned_to_user0 = TRUE OR is_assigned_to_user0 IS NULL)"
+        f" AND (is_virtual_machine0 = FALSE OR is_virtual_machine0 IS NULL)"
+        f" AND (decommissioned0 IS NULL OR decommissioned0 = 0)"
+        f" AND (obsolete0 IS NULL OR obsolete0 = 0)"
+        f" AND (active0 IS NULL OR active0 != 0)"
         f" AND (operating_system_name_and0 NOT LIKE '%Server%' OR operating_system_name_and0 IS NULL)"
     )
 

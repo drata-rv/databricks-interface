@@ -108,7 +108,10 @@ def _build_app_list(software: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return result
 
 
-def _auto_update(wu: Dict[str, Any]) -> Tuple[bool, str]:
+def _auto_update(wu: Dict[str, Any], device: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+    if device:
+        if device.get('disable_windows_update_access') or device.get('do_not_connect_to_wu_locations'):
+            return False, 'Windows Update disabled by policy'
     option = str(wu.get('auoptions0') or '').strip()
     enabled = option == '4'
     explanation = AU_OPTIONS.get(option, 'Unknown')
@@ -253,8 +256,13 @@ def extract_features(merged: Dict[str, Any]) -> Dict[str, Any]:
     user = merged.get('user', {})
 
     av_enabled, av_apps = _detect_apps(software, ANTIVIRUS_SIGNATURES)
+    sense_id = (device.get('sense_id') or '').strip()
+    if sense_id:
+        av_enabled = True
+        if 'Microsoft Defender for Endpoint' not in av_apps:
+            av_apps = [*av_apps, 'Microsoft Defender for Endpoint']
     pm_enabled, pm_apps = _detect_apps(software, PASSWORD_MANAGER_SIGNATURES)
-    au_enabled, au_explanation = _auto_update(wu)
+    au_enabled, au_explanation = _auto_update(wu, device)
     fw_enabled, fw_explanation = _extract_firewall(merged.get('services'))
     enc_enabled, enc_explanation = _extract_encryption(merged.get('bitlocker'))
     sl_enabled, sl_explanation, sl_time = _extract_screen_lock(merged.get('screensaver'))
