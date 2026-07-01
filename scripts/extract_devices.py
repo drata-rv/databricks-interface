@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from db.auth import get_client_for, load_env
 from db import queries
 from db.queries import rows_to_records
-from db.transform import transform_all, apply_test_overrides, apply_sandbox_overrides
+from db.transform import transform_all, apply_test_overrides, apply_sandbox_overrides, decode_security_center_state
 
 load_env()
 
@@ -73,6 +73,11 @@ TableSpec = collections.namedtuple(
 TABLE_REGISTRY = [
     TableSpec('windows_update',     'DATABRICKS_TABLE_WINDOWS_UPDATE',     'test', 'resource_id', True,  False),
     TableSpec('installed_software', 'DATABRICKS_TABLE_INSTALLED_SOFTWARE', 'test', 'resource_id', True,  True),
+    # Antivirus/firewall product tables (WSC-style, confirmed 2026-06-24). Pulled and merged
+    # into the raw record now; NOT yet consumed by transform.py -- see extract_features() and
+    # the [DIAGNOSTIC] block in main() for the validation-pending antivirus decode.
+    TableSpec('antivirus_product',  'DATABRICKS_TABLE_ANTIVIRUS',           'test', 'resource_id', False, False),
+    TableSpec('firewall_product',   'DATABRICKS_TABLE_FIREWALL',            'test', 'resource_id', False, False),
     # Uncomment when Nationwide confirms table names:
     # TableSpec('bitlocker',       'DATABRICKS_TABLE_BITLOCKER',       'test', 'resource_id', False, False),
     # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'test', 'resource_id', False, False),
@@ -216,6 +221,8 @@ def merge(
     screensaver: Optional[List[Dict[str, Any]]] = None,
     services: Optional[List[Dict[str, Any]]] = None,
     network_adapter: Optional[List[Dict[str, Any]]] = None,
+    antivirus_product: Optional[List[Dict[str, Any]]] = None,
+    firewall_product: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
     Inner join: users are the anchor. Only devices with a matched user are included.
@@ -285,6 +292,27 @@ def merge(
             if rid is not None:
                 network_adapter_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
 
+    # antivirus_product / firewall_product: list-indexed like installed_software -- a device
+    # can have more than one registered product row (e.g. a stale Defender entry alongside
+    # an active third-party product).
+    antivirus_index: Optional[Dict[int, List[Dict[str, Any]]]] = None
+    if antivirus_product is not None:
+        antivirus_index = {}
+        for row in antivirus_product:
+            rid = get_resource_id(row)
+            if rid is not None:
+                entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                antivirus_index.setdefault(rid, []).append(entry)
+
+    firewall_index: Optional[Dict[int, List[Dict[str, Any]]]] = None
+    if firewall_product is not None:
+        firewall_index = {}
+        for row in firewall_product:
+            rid = get_resource_id(row)
+            if rid is not None:
+                entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                firewall_index.setdefault(rid, []).append(entry)
+
     # User-centric iteration: users anchor the output set.
     # Try Netbios join first (xlsx path), fall back to username+domain join (Databricks path).
     matched_device_ids: set = set()
@@ -319,6 +347,8 @@ def merge(
             "screensaver": screensaver_index.get(rid) if screensaver_index is not None else None,
             "services": services_index.get(rid, []) if services_index is not None else None,
             "network_adapter": network_adapter_index.get(rid) if network_adapter_index is not None else None,
+            "antivirus_product": antivirus_index.get(rid, []) if antivirus_index is not None else None,
+            "firewall_product": firewall_index.get(rid, []) if firewall_index is not None else None,
         })
 
     dropped = len(devices) - len(matched_device_ids)
@@ -636,6 +666,7 @@ def main() -> None:
     clients = {'prod': prod_client, 'test': test_client}
     all_merged: List[Dict[str, Any]] = []
     all_drata: List[Dict[str, Any]] = []
+    av_state_counts: Dict[Tuple[str, Any], int] = {}
 
     for chunk_num, chunk in enumerate(chunks, 1):
         if len(chunks) > 1:
@@ -710,6 +741,13 @@ def main() -> None:
             if not data:
                 print(f"  [WARN] {spec.label} returned 0 rows")
 
+        # Diagnostic only -- tally product_state0 combos seen so far; antivirusEnabled
+        # in this run's push is NOT derived from this data (see [DIAGNOSTIC] summary below).
+        if pulled.get('antivirus_product'):
+            for row in pulled['antivirus_product']:
+                key = (row.get('display_name0') or '(no name)', row.get('product_state0'))
+                av_state_counts[key] = av_state_counts.get(key, 0) + 1
+
         # Step 4: merge (user-centric inner join)
         print(f"  Merging (user-centric) ...")
         merged_chunk, dropped = merge(
@@ -721,6 +759,8 @@ def main() -> None:
             screensaver=pulled.get('screensaver'),
             services=pulled.get('services'),
             network_adapter=pulled.get('network_adapter'),
+            antivirus_product=pulled.get('antivirus_product'),
+            firewall_product=pulled.get('firewall_product'),
         )
         print(f"  {len(merged_chunk)} records assembled.")
         if dropped:
@@ -748,6 +788,20 @@ def main() -> None:
         print(f"\n  {len(all_drata)} total record(s) transformed.")
     if args.sandbox:
         print(f"  [SANDBOX] personnelId domain rewritten to @sandbox.nationwide.com.")
+
+    if av_state_counts:
+        total_rows = sum(av_state_counts.values())
+        print(f"\n[DIAGNOSTIC] antivirus_product product_state0 distribution "
+              f"({len(av_state_counts)} distinct combo(s) across {total_rows} row(s)):")
+        print(f"  antivirusEnabled in this run's push is NOT derived from this table yet -- "
+              f"decode pending validation against known devices.")
+        ranked = sorted(av_state_counts.items(), key=lambda kv: -kv[1])
+        for (name, state), count in ranked[:30]:
+            decoded = decode_security_center_state(state)
+            tag = {True: 'ENABLED', False: 'DISABLED', None: 'UNKNOWN'}[decoded]
+            print(f"    {count:>6}x  display_name0={name!r:<40} product_state0={state!r:<12} decode={tag}")
+        if len(ranked) > 30:
+            print(f"    ... and {len(ranked) - 30} more combo(s) -- see {raw_path} for full antivirus_product data")
 
     # Step 6: write output files
     write_json(all_merged, raw_path)

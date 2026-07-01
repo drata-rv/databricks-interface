@@ -74,6 +74,29 @@ def _detect_apps(
     return len(matched) > 0, matched
 
 
+# Windows Security Center productState0 bitmask decode (t_sccm_gs_antivirusproduct,
+# t_sccm_gs_firewallproduct). This is the standard WSC encoding used industry-wide,
+# but these specific constants have not been validated against real Nationwide device
+# data. Returns None for anything outside these sets -- callers must treat None as
+# "unknown," never as False. Not yet consumed by extract_features(); see extract_devices.py
+# diagnostic output for the live product_state0 distribution pending validation.
+_SC_ENABLED_STATES = {266240, 397568, 397584}
+_SC_DISABLED_STATES = {262144, 262160, 393216, 393472}
+
+
+def decode_security_center_state(product_state: Any) -> Optional[bool]:
+    """Decode a Windows Security Center product_state0 value. None if not a recognized value."""
+    try:
+        state = int(product_state)
+    except (ValueError, TypeError):
+        return None
+    if state in _SC_ENABLED_STATES:
+        return True
+    if state in _SC_DISABLED_STATES:
+        return False
+    return None
+
+
 def _platform_name(os_string: Optional[str]) -> str:
     s = (os_string or '').lower()
     if 'windows' in s:
