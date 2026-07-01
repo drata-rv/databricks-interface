@@ -917,6 +917,22 @@ def main() -> None:
     if no_extid_records:
         print(f"  [WARN] {len(no_extid_records)} record(s) excluded -- externalId null (serial number missing in SCCM).")
 
+    # Duplicate externalId -- would silently collide on the Drata upsert key, with one
+    # device's compliance record overwriting another's. Defense in depth on top of the
+    # placeholder-serial-number rejection in transform.py: catches any other source of
+    # a shared value (data entry error, cloned image, etc.) that isn't a known placeholder.
+    extid_counts: Dict[Any, int] = {}
+    for r in valid_payload:
+        extid_counts[r.get('externalId')] = extid_counts.get(r.get('externalId'), 0) + 1
+    dup_ids = {eid for eid, count in extid_counts.items() if count > 1}
+    if dup_ids:
+        dup_records = [r for r in valid_payload if r.get('externalId') in dup_ids]
+        for r in dup_records:
+            rejected.append({**r, 'rejection_reason': 'duplicate_externalId'})
+        valid_payload = [r for r in valid_payload if r.get('externalId') not in dup_ids]
+        print(f"  [WARN] {len(dup_records)} record(s) excluded -- externalId collides with another "
+              f"record in this run ({len(dup_ids)} distinct colliding value(s)).")
+
     if rejected:
         write_json(rejected, rejected_path)
         print(f"  [WARN] {len(rejected)} total record(s) rejected -- see {rejected_path}")

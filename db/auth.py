@@ -31,13 +31,9 @@ def load_env() -> None:
         pass
 
 
-# Keep the private alias for internal use
-_load_dotenv = load_env
-
-
 def get_client() -> WorkspaceClient:
     """Return an authenticated WorkspaceClient using env/config credential chain."""
-    _load_dotenv()
+    load_env()
     return WorkspaceClient()
 
 
@@ -47,6 +43,7 @@ def get_client_for(host: str, token: str) -> WorkspaceClient:
     Use this when targeting a workspace other than the default (e.g. a test
     workspace with a different URL and token).
     """
+    load_env()
     return WorkspaceClient(host=host, token=token)
 
 
@@ -55,5 +52,5 @@ def get_config() -> Config:
 
     Useful for inspecting which host/auth method was resolved.
     """
-    _load_dotenv()
+    load_env()
     return Config()

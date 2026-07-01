@@ -49,22 +49,6 @@ class DrataClient:
         })
         return s
 
-    def push_batch(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Push all records to Drata one at a time (API accepts one device per POST).
-
-        Returns a summary dict: {'total': int, 'pushed': int, 'errors': list}.
-        errors is a list of {'index': int, 'error': str} for failed records.
-        """
-        url = f"{_BASE_URL}{_PUSH_PATH.format(connection_id=self._connection_id)}"
-        errors: List[Dict[str, Any]] = []
-        pushed = 0
-        for i, record in enumerate(records):
-            success = self._push_one_record(url, record, i + 1, len(records), errors)
-            if success:
-                pushed += 1
-        return {'total': len(records), 'pushed': pushed, 'errors': errors}
-
     def push_batch_parallel(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Push all records to Drata concurrently using a thread pool.
@@ -125,6 +109,7 @@ class DrataClient:
 
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get('Retry-After', _RETRY_DELAYS[min(attempt - 1, 1)]))
+                    last_err = f"HTTP 429: rate limited (retry {attempt}/{_MAX_RETRIES})"
                     print(f"    [RATE LIMIT] personnelId={pid} retrying in {retry_after}s ...")
                     time.sleep(retry_after)
                     continue

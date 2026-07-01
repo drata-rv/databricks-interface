@@ -162,7 +162,7 @@ def run_sql(
     )
 
     def _fetch_chunk(url: str) -> List[List[str]]:
-        resp = _req.get(url, timeout=300)
+        resp = _req.get(url, timeout=timeout_seconds)
         resp.raise_for_status()
         rows = list(csv.reader(io.StringIO(resp.text)))
         # CSV chunks have no header row; strip one defensively if present.
