@@ -73,11 +73,13 @@ TableSpec = collections.namedtuple(
 TABLE_REGISTRY = [
     TableSpec('windows_update',     'DATABRICKS_TABLE_WINDOWS_UPDATE',     'test', 'resource_id', True,  False),
     TableSpec('installed_software', 'DATABRICKS_TABLE_INSTALLED_SOFTWARE', 'test', 'resource_id', True,  True),
-    # Antivirus/firewall product tables (WSC-style, confirmed 2026-06-24). Pulled and merged
-    # into the raw record now; NOT yet consumed by transform.py -- see extract_features() and
-    # the [DIAGNOSTIC] block in main() for the validation-pending antivirus decode.
-    TableSpec('antivirus_product',  'DATABRICKS_TABLE_ANTIVIRUS',           'test', 'resource_id', False, False),
-    TableSpec('firewall_product',   'DATABRICKS_TABLE_FIREWALL',            'test', 'resource_id', False, False),
+    # Antivirus/firewall product tables (WSC-style, confirmed 2026-06-24). Batched
+    # defensively -- row counts unconfirmed, treat as potentially large like installed_software.
+    # antivirus_product feeds antivirusEnabled (presence-based: any registered row = protected;
+    # see _antivirus_from_securitycenter in transform.py). firewall_product is pulled/merged
+    # only -- transform.py has no reference to it, so it cannot reach the Drata push payload.
+    TableSpec('antivirus_product',  'DATABRICKS_TABLE_ANTIVIRUS',           'test', 'resource_id', False, True),
+    TableSpec('firewall_product',   'DATABRICKS_TABLE_FIREWALL',            'test', 'resource_id', False, True),
     # Uncomment when Nationwide confirms table names:
     # TableSpec('bitlocker',       'DATABRICKS_TABLE_BITLOCKER',       'test', 'resource_id', False, False),
     # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'test', 'resource_id', False, False),
@@ -793,8 +795,9 @@ def main() -> None:
         total_rows = sum(av_state_counts.values())
         print(f"\n[DIAGNOSTIC] antivirus_product product_state0 distribution "
               f"({len(av_state_counts)} distinct combo(s) across {total_rows} row(s)):")
-        print(f"  antivirusEnabled in this run's push is NOT derived from this table yet -- "
-              f"decode pending validation against known devices.")
+        print(f"  antivirusEnabled treats ANY row in this table as a confirmed AV signal "
+              f"(presence-based). The decode column below is informational only -- "
+              f"it is not used to determine pass/fail.")
         ranked = sorted(av_state_counts.items(), key=lambda kv: -kv[1])
         for (name, state), count in ranked[:30]:
             decoded = decode_security_center_state(state)

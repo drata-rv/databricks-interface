@@ -75,11 +75,12 @@ def _detect_apps(
 
 
 # Windows Security Center productState0 bitmask decode (t_sccm_gs_antivirusproduct,
-# t_sccm_gs_firewallproduct). This is the standard WSC encoding used industry-wide,
-# but these specific constants have not been validated against real Nationwide device
-# data. Returns None for anything outside these sets -- callers must treat None as
-# "unknown," never as False. Not yet consumed by extract_features(); see extract_devices.py
-# diagnostic output for the live product_state0 distribution pending validation.
+# t_sccm_gs_firewallproduct). Standard WSC encoding used industry-wide, but these specific
+# constants have not been validated against real Nationwide device data. Returns None for
+# anything outside these sets -- callers must treat None as "unknown," never as False.
+# Not used to drive antivirusEnabled (see _antivirus_from_securitycenter below, which uses
+# simple row presence instead) -- kept for the informational decode column in
+# extract_devices.py's [DIAGNOSTIC] output, and available if finer-grained state is needed later.
 _SC_ENABLED_STATES = {266240, 397568, 397584}
 _SC_DISABLED_STATES = {262144, 262160, 393216, 393472}
 
@@ -95,6 +96,27 @@ def decode_security_center_state(product_state: Any) -> Optional[bool]:
     if state in _SC_DISABLED_STATES:
         return False
     return None
+
+
+def _antivirus_from_securitycenter(
+    products: Optional[List[Dict[str, Any]]],
+) -> Tuple[bool, List[str]]:
+    """Presence-based AV signal: any registered SecurityCenter row means protected, period.
+
+    Does not inspect product_state0 -- a row existing at all confirms Windows has a
+    registered antivirus product for this device. Absence of rows does not assert the
+    opposite; extract_features() falls back to the existing signature/sense_id heuristic.
+    """
+    if not products:
+        return False, []
+    names = []
+    seen = set()
+    for p in products:
+        name = p.get('display_name0')
+        if name and name not in seen:
+            names.append(name)
+            seen.add(name)
+    return True, names
 
 
 def _platform_name(os_string: Optional[str]) -> str:
@@ -284,6 +306,10 @@ def extract_features(merged: Dict[str, Any]) -> Dict[str, Any]:
         av_enabled = True
         if 'Microsoft Defender for Endpoint' not in av_apps:
             av_apps = [*av_apps, 'Microsoft Defender for Endpoint']
+    sc_present, sc_names = _antivirus_from_securitycenter(merged.get('antivirus_product'))
+    if sc_present:
+        av_enabled = True
+        av_apps = av_apps + [n for n in sc_names if n not in av_apps]
     pm_enabled, pm_apps = _detect_apps(software, PASSWORD_MANAGER_SIGNATURES)
     au_enabled, au_explanation = _auto_update(wu, device)
     fw_enabled, fw_explanation = _extract_firewall(merged.get('services'))
