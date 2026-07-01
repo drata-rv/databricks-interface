@@ -23,6 +23,7 @@ Fields set to null -- require additional SCCM tables (uncomment in TABLE_REGISTR
   browserExtensions    -- not captured by SCCM
 """
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -55,8 +56,12 @@ AU_OPTIONS: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _match_signatures(app_name: str, signatures: List[str]) -> bool:
+    """Word-boundary match -- a bare substring match on short signatures like 'avg' or
+    'eset' would false-positive on any unrelated product name that happens to contain
+    those letters in sequence (e.g. a product named "...avg..." with no relation to
+    AVG antivirus)."""
     name_lower = (app_name or '').lower()
-    return any(sig in name_lower for sig in signatures)
+    return any(re.search(r'\b' + re.escape(sig) + r'\b', name_lower) for sig in signatures)
 
 
 def _detect_apps(
@@ -153,14 +158,51 @@ def _build_app_list(software: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return result
 
 
+def _is_true(value: Any) -> bool:
+    """Interpret a Databricks `boolean` column value that may have crossed the CSV export
+    boundary as a string ('true'/'false') rather than a native Python bool. run_sql uses CSV
+    disposition (db/queries.py), so a boolean column's False value round-trips as the
+    non-empty string 'false' -- and bool('false') is True in Python. Without this, every
+    policy/flag column read this way is silently truthy regardless of its real value."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in ('true', '1', 't', 'yes')
+
+
 def _auto_update(wu: Dict[str, Any], device: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
     if device:
-        if device.get('disable_windows_update_access') or device.get('do_not_connect_to_wu_locations'):
+        if _is_true(device.get('disable_windows_update_access')) or _is_true(device.get('do_not_connect_to_wu_locations')):
             return False, 'Windows Update disabled by policy'
     option = str(wu.get('auoptions0') or '').strip()
     enabled = option == '4'
     explanation = AU_OPTIONS.get(option, 'Unknown')
     return enabled, explanation
+
+
+# Known OEM/generic-hardware BIOS serial placeholders. Widely documented across the IT
+# asset management industry -- motherboard manufacturers ship these literal strings when
+# the real serial was never programmed at the factory (common on whitebox/VDI/imaged
+# fleets). If treated as real, two unrelated devices sharing a placeholder would collide
+# on the Drata upsert key (externalId), silently overwriting one device's compliance
+# record with the other's.
+_PLACEHOLDER_SERIAL_NUMBERS = frozenset({
+    'to be filled by o.e.m.', 'system serial number', 'default string',
+    'none', 'n/a', 'na', 'not specified', 'not applicable', 'invalid',
+    'serial number', 'chassis serial number', '0', '00000000',
+    '1234567890', 'unknown',
+})
+
+
+def _valid_serial(serial: Optional[str]) -> Optional[str]:
+    """Return serial unchanged if it looks like a real, unique value; None otherwise."""
+    if not serial:
+        return None
+    normalized = str(serial).strip().lower()
+    if not normalized or normalized in _PLACEHOLDER_SERIAL_NUMBERS:
+        return None
+    return serial
 
 
 def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
@@ -226,7 +268,7 @@ def _extract_screen_lock(
         wait = int(wait_raw) if wait_raw is not None else None
     except (ValueError, TypeError):
         wait = None
-    enabled = bool(is_enabled) and bool(is_secure)
+    enabled = _is_true(is_enabled) and _is_true(is_secure)
     if wait is not None:
         explanation = f"ScreenLock delay is {wait} minutes"
     elif enabled:
@@ -347,15 +389,16 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
     """Map an extracted-features dict to the Drata Custom Device Connection JSON shape."""
     device = features['device']
     user = features['user']
+    valid_serial = _valid_serial(device.get('SerialNumber') or device.get('serial_number'))
     return {
         'personnelId': _resolve_personnel_id(user),
-        'serialNumber': device.get('SerialNumber') or device.get('serial_number'),
+        'serialNumber': valid_serial,
         'alias': (
             device.get('Netbios_Name0') or device.get('Name0')
             or device.get('netbios_name0') or device.get('name0')
         ),
         'externalId': (
-            device.get('SerialNumber') or device.get('serial_number')
+            valid_serial
             or device.get('AADDeviceID') or device.get('aad_device_id')
             or (str(features['resource_id']) if features.get('resource_id') is not None else None)
         ),
@@ -432,11 +475,6 @@ def apply_test_overrides(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-def to_drata_record(merged: Dict[str, Any]) -> Dict[str, Any]:
-    """Transform a merged SCCM record into a Drata Custom MDM payload."""
-    return format_for_drata(extract_features(merged))
-
 
 def transform_all(merged_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Transform a list of merged records into Drata MDM payloads."""
