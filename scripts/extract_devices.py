@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import atexit
 import collections
 import json
 import os
@@ -38,6 +39,44 @@ from db.queries import rows_to_records
 from db.transform import transform_all, apply_test_overrides, apply_sandbox_overrides, decode_security_center_state
 
 load_env()
+
+
+# ---------------------------------------------------------------------------
+# Crash safety: a fatal error (e.g. a required table exhausting retries) calls
+# sys.exit() from deep inside the per-chunk loop. Without this, every chunk's
+# already-merged, already-transformed output -- potentially hours of Databricks
+# query time on a large --full run -- is discarded, since output files are only
+# written after the entire chunk loop finishes. atexit fires on sys.exit() (and
+# on an uncaught exception) from anywhere in the call stack, so this recovers
+# whatever was completed without touching the loop's own control flow.
+# ---------------------------------------------------------------------------
+_crash_state: Dict[str, Any] = {
+    'flushed_normally': False,
+    'all_merged': [],
+    'all_drata': [],
+    'raw_path': None,
+    'drata_path': None,
+    'chunks_completed': 0,
+    'total_chunks': 0,
+}
+
+
+def _flush_partial_on_crash() -> None:
+    if _crash_state['flushed_normally'] or not _crash_state['all_merged']:
+        return
+    print(f"\n[CRASH RECOVERY] Pipeline aborted after "
+          f"{_crash_state['chunks_completed']}/{_crash_state['total_chunks']} chunk(s) completed.")
+    print(f"  Flushing {len(_crash_state['all_merged'])} already-merged record(s) to disk before exiting ...")
+    write_json(_crash_state['all_merged'], _crash_state['raw_path'])
+    write_json(_crash_state['all_drata'], _crash_state['drata_path'])
+    print(f"  [OK] Partial raw JSON  : {_crash_state['raw_path']}")
+    print(f"  [OK] Partial Drata JSON: {_crash_state['drata_path']}")
+    print(f"  NOTE: these records were NOT pushed to Drata. Chunks are independent and Drata")
+    print(f"        upserts on externalId, so fixing the failure and re-running from the start")
+    print(f"        is safe and will not create duplicate Drata records.")
+
+
+atexit.register(_flush_partial_on_crash)
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +192,15 @@ def pull_table(
     limit: Optional[int] = None,
     filter_sql: Optional[str] = None,
     timeout: int = 300,
-) -> List[Dict[str, Any]]:
-    """Pull a table and return cleaned records. Exits on failure after retries."""
+    required: bool = True,
+) -> Optional[List[Dict[str, Any]]]:
+    """Pull a table and return cleaned records.
+
+    required=True (default): exits the process after exhausting retries -- used for
+    tables the pipeline cannot proceed without (users, devices, windows_update, ...).
+    required=False: logs a warning and returns None instead of exiting, so a transient
+    failure on a best-effort table (e.g. antivirus_product) cannot abort a multi-hour run.
+    """
     parts = [f"SELECT * FROM {table}"]
     if filter_sql:
         parts.append(f"WHERE {filter_sql}")
@@ -182,6 +228,11 @@ def pull_table(
                 time.sleep(wait)
     raw = str(last_error)
     short = raw.split(". Config:")[0].split(". Env:")[0].strip()
+    if not required:
+        print(f"  [WARN] {label} unavailable (all {_MAX_RETRIES} attempts failed) -- treating as absent for this run.")
+        print(f"         Table     : {table}")
+        print(f"         Error     : {short}")
+        return None
     print(f"  [FAIL] {label} (all {_MAX_RETRIES} attempts failed)")
     print(f"         Table     : {table}")
     print(f"         Warehouse : {warehouse_id}")
@@ -197,8 +248,13 @@ def pull_table_batched(
     ids: List[int],
     id_column: str = "resource_id",
     timeout: int = 300,
-) -> List[Dict[str, Any]]:
-    """Pull a large table by chunking the IN-clause into batches of _SW_BATCH_SIZE."""
+    required: bool = True,
+) -> Optional[List[Dict[str, Any]]]:
+    """Pull a large table by chunking the IN-clause into batches of _SW_BATCH_SIZE.
+
+    When required=False, a batch that exhausts retries aborts just this table for this
+    chunk (returns None) instead of exiting the whole process.
+    """
     all_records: List[Dict[str, Any]] = []
     total_batches = (len(ids) + _SW_BATCH_SIZE - 1) // _SW_BATCH_SIZE
     for i in range(0, len(ids), _SW_BATCH_SIZE):
@@ -209,7 +265,10 @@ def pull_table_batched(
             f"{label} (batch {batch_num}/{total_batches})",
             filter_sql=_ids_filter(batch, column=id_column),
             timeout=timeout,
+            required=required,
         )
+        if records is None:
+            return None
         all_records.extend(records)
     return all_records
 
@@ -543,6 +602,8 @@ def main() -> None:
     raw_path = Path(args.output_raw) if args.output_raw else default_raw
     drata_path = Path(args.output_drata) if args.output_drata else default_drata
     rejected_path = drata_path.parent / drata_path.name.replace('_drata.json', '_rejected.json')
+    _crash_state['raw_path'] = raw_path
+    _crash_state['drata_path'] = drata_path
 
     print(f"\nProd workspace   : {args.host_prod}")
     print(f"Test workspace   : {args.host_test}")
@@ -664,11 +725,16 @@ def main() -> None:
     chunks = [all_users[i:i + _PIPELINE_CHUNK_SIZE]
               for i in range(0, len(all_users), _PIPELINE_CHUNK_SIZE)]
     print(f"\n{len(all_users)} user(s) in {len(chunks)} chunk(s) of up to {_PIPELINE_CHUNK_SIZE}.")
+    _crash_state['total_chunks'] = len(chunks)
 
     clients = {'prod': prod_client, 'test': test_client}
     all_merged: List[Dict[str, Any]] = []
     all_drata: List[Dict[str, Any]] = []
     av_state_counts: Dict[Tuple[str, Any], int] = {}
+    # Alias (not copy) -- _crash_state stays current via in-place .extend() below with no
+    # further updates needed here.
+    _crash_state['all_merged'] = all_merged
+    _crash_state['all_drata'] = all_drata
 
     for chunk_num, chunk in enumerate(chunks, 1):
         if len(chunks) > 1:
@@ -732,15 +798,15 @@ def main() -> None:
             if spec.batched:
                 data = pull_table_batched(
                     clients[spec.client_key], table_path, wh, spec.label,
-                    ids=resource_ids, timeout=args.timeout,
+                    ids=resource_ids, timeout=args.timeout, required=spec.required,
                 )
             else:
                 data = pull_table(
                     clients[spec.client_key], table_path, wh, spec.label,
-                    filter_sql=filter_map[spec.filter_type], timeout=args.timeout,
+                    filter_sql=filter_map[spec.filter_type], timeout=args.timeout, required=spec.required,
                 )
             pulled[spec.label] = data
-            if not data:
+            if data is not None and not data:
                 print(f"  [WARN] {spec.label} returned 0 rows")
 
         # Diagnostic only -- tally product_state0 combos seen so far; antivirusEnabled
@@ -777,6 +843,7 @@ def main() -> None:
 
         all_merged.extend(merged_chunk)
         all_drata.extend(drata_chunk)
+        _crash_state['chunks_completed'] = chunk_num
 
     if not all_merged:
         print("  [FAIL] No records produced across all chunks.")
@@ -812,6 +879,7 @@ def main() -> None:
 
     write_json(all_drata, drata_path)
     print(f"[OK] Drata MDM JSON   : {drata_path}")
+    _crash_state['flushed_normally'] = True
 
     # Step 7: push to Drata API
     # Each filter below removes records that cannot be safely pushed and logs them to
