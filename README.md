@@ -1,6 +1,6 @@
 # Databricks Interface
 
-Python interface to the Databricks REST API. Authenticates against two Databricks workspaces, pulls four SCCM device tables, joins them on `resource_id` and `Netbios_Name0`, and produces a JSON payload in the Drata Custom Device Connection format.
+Python interface to the Databricks REST API. Authenticates against two Databricks workspaces, pulls SCCM device, user, and endpoint-protection tables through an extensible table registry, joins them per employee, and produces a JSON payload in the Drata Custom Device Connection format.
 
 ---
 
@@ -86,8 +86,10 @@ The `.env.example` file is pre-filled with all known workspace URLs, warehouse I
 | `DATABRICKS_TABLE_DEVICES` | Yes | Fully qualified devices table path (prod catalog) |
 | `DATABRICKS_TABLE_WINDOWS_UPDATE` | Yes | Fully qualified path to t_sccm_gs_windowsupdate (test catalog) |
 | `DATABRICKS_TABLE_INSTALLED_SOFTWARE` | Yes | Fully qualified path to t_sccm_gs_installed_software (test catalog) |
-| `DATABRICKS_TABLE_USERS` | Yes | Fully qualified path to the user identity table (test catalog) |
-| `DATABRICKS_LIMIT` | No | Max device rows to pull per run (default: 1000) |
+| `DATABRICKS_TABLE_ANTIVIRUS` | No | Path to t_sccm_gs_antivirusproduct -- feeds `antivirusEnabled` (any registered row counts as protected) |
+| `DATABRICKS_TABLE_FIREWALL` | No | Path to t_sccm_gs_firewallproduct -- pulled into raw output only, not yet wired to a Drata field |
+| `DATABRICKS_TABLE_USERS` | Yes | Fully qualified path to the user identity table (test catalog); not required if `--local-users` is passed |
+| `DATABRICKS_LIMIT` | No | Max users to process per run (default: 1000); bypassed by `--full` |
 | `DATABRICKS_QUERY_TIMEOUT` | No | Per-query timeout in seconds, covers cold warehouse start (default: 300) |
 | `DATABRICKS_TOKEN` | No | Shared token fallback used by both workspaces if workspace-specific vars are not set |
 | `DRATA_API_KEY` | No* | Drata public API Bearer token |
@@ -127,21 +129,27 @@ python scripts/test_connection.py --table catalog.schema.table_name --limit 10
 python scripts/extract_devices.py
 ```
 
-Two output files are written per run:
+Up to three output files are written per run:
 
 - `output/devices_<timestamp>_raw.json` -- merged SCCM data exactly as pulled
 - `output/devices_<timestamp>_drata.json` -- transformed into Drata Custom Device Connection format
+- `output/devices_<timestamp>_rejected.json` -- records excluded from the push (missing personnelId, empty appList, or missing externalId), each tagged with a `rejection_reason`; only written if any records were excluded
 
-Use `--dry-run` to run the full pipeline and write output files without pushing to Drata:
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--local-users` | Load users from the local xlsx instead of `DATABRICKS_TABLE_USERS` (sandbox testing only) |
+| `--full` | Bypass `--limit` and process every user -- production sync |
+| `--test-mode` | Force all 5 monitoring fields to a passing state while keeping real identities |
+| `--sandbox` | Rewrite `personnelId` from `@nationwide.com` to `@sandbox.nationwide.com` before pushing |
+| `--dry-run` | Run the full pipeline and write output files, but skip the Drata push |
+| `--debug` | Print the full resolved environment before running |
+
+A typical sandbox test run combines several of these:
 
 ```bash
-python scripts/extract_devices.py --dry-run
-```
-
-Use `--debug` to print the full resolved environment before running:
-
-```bash
-python scripts/extract_devices.py --debug
+python scripts/extract_devices.py --local-users --test-mode --full --sandbox
 ```
 
 ### Step 3: Push to Drata
@@ -158,16 +166,17 @@ python scripts/extract_devices.py --limit 5
 
 ## What the ETL Does
 
-1. Pulls the devices table from the prod workspace (up to `DATABRICKS_LIMIT` rows)
-2. Derives `resource_id` and `Netbios_Name0` from that device set
-3. Queries secondary tables from the test workspace using IN-clause filters scoped to those device IDs -- no row cap
+1. Loads users first, from `DATABRICKS_TABLE_USERS` or the local xlsx via `--local-users` -- users anchor everything downstream
+2. Filters users against Drata personnel status, keeping only current employees and contractors
+3. Processes users in chunks of 500: pulls devices scoped to that chunk (excluding servers, VMs, and decommissioned/inactive machines), then pulls secondary tables (Windows Update, installed software, antivirus, firewall) via `TABLE_REGISTRY`
 4. Merges using users as the anchor (inner join): only devices with a matched user record are included; unmatched devices are counted and logged
-5. Extracts the 5 Drata monitoring signals (antivirus, auto-update, password manager, encryption, screen lock) from the merged data
+5. Extracts the Drata monitoring signals from the merged data (antivirus, auto-update, password manager; encryption and screen lock remain null pending additional SCCM tables)
 6. Formats each merged record into the Drata Custom Device Connection JSON shape
-7. Writes both the raw merged record and the Drata payload per run
-8. Pushes to the Drata API if `DRATA_API_KEY` and `DRATA_CONNECTION_ID` are set
+7. Applies pre-push quality gates -- records missing a personnelId, appList, or externalId are excluded and written to `_rejected.json` instead of being pushed
+8. Writes all output files
+9. Pushes to the Drata API if `DRATA_API_KEY` and `DRATA_CONNECTION_ID` are set
 
-The `output/` directory is git-ignored. Each run produces a new timestamped pair of files.
+The `output/` directory is git-ignored. Each run produces a new timestamped set of files.
 
 ### Adding a new SCCM table
 
