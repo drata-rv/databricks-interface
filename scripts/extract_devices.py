@@ -292,10 +292,13 @@ def merge(
     that had no matching user entry.
     """
     # Build dual device indexes to support both join strategies:
-    #   Netbios join  -- xlsx path (users have Netbios_Name0)
-    #   Username join -- Databricks path (users have user_name0 + windows_nt_domain0)
+    #   Netbios join  -- xlsx path (users have Netbios_Name0), inherently 1:1 (pre-joined)
+    #   Username join -- Databricks path (users have user_name0 + windows_nt_domain0);
+    #                    list-valued because one user can have more than one device
+    #                    (e.g. desktop + laptop both last-logged-in by the same account) --
+    #                    a plain-dict assignment here would silently drop all but the last.
     device_by_netbios: Dict[str, Dict[str, Any]] = {}
-    device_by_username: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    device_by_username: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for dev in devices:
         netbios = dev.get('Netbios_Name0') or dev.get('Name0')
         if netbios:
@@ -303,7 +306,7 @@ def merge(
         uname = (dev.get('user_name0') or dev.get('User_Name0') or '').strip().lower()
         udomain = (dev.get('user_domain0') or dev.get('User_Domain0') or '').strip().lower()
         if uname:
-            device_by_username[(uname, udomain)] = dev
+            device_by_username.setdefault((uname, udomain), []).append(dev)
 
     # Index resource_id-keyed tables
     wu_index: Dict[int, Dict[str, Any]] = {}
@@ -376,41 +379,43 @@ def merge(
 
     # User-centric iteration: users anchor the output set.
     # Try Netbios join first (xlsx path), fall back to username+domain join (Databricks path).
+    # A user can match more than one device on the Databricks path -- each produces its own
+    # output record (same personnelId, different device), matching a real one-employee-many-
+    # devices relationship instead of silently keeping only one.
     matched_device_ids: set = set()
     output: List[Dict[str, Any]] = []
     for row in users:
         netbios = row.get('Netbios_Name0') or row.get('netbios_name0')
         if netbios and netbios in device_by_netbios:
-            device = device_by_netbios[netbios]
+            matched_devices = [device_by_netbios[netbios]]
         else:
             uname = (row.get('user_name0') or '').strip().lower()
             udomain = (row.get('windows_nt_domain0') or '').strip().lower()
-            device = device_by_username.get((uname, udomain)) if uname else None
-        if not device:
-            continue
-        rid = get_resource_id(device)
-        device_key = rid if rid is not None else (
-            device.get('Netbios_Name0') or device.get('Name0') or device.get('netbios_name0')
-        )
-        matched_device_ids.add(device_key)
-        if rid is None:
-            label = device.get('Netbios_Name0') or device.get('Name0') or device.get('netbios_name0') or '?'
-            print(f"  [WARN] merge: device {label!r} has no parseable resource_id -- software/WU data will be empty.")
-        user_fields = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
-        device_fields = {k: v for k, v in device.items() if k not in ("resource_id", "ResourceID", "ResourceType")}
-        output.append({
-            "resource_id": rid,
-            "device": device_fields,
-            "windows_update": wu_index.get(rid, {}),
-            "installed_software": sw_index.get(rid, []),
-            "user": user_fields,
-            "bitlocker": bitlocker_index.get(rid) if bitlocker_index is not None else None,
-            "screensaver": screensaver_index.get(rid) if screensaver_index is not None else None,
-            "services": services_index.get(rid, []) if services_index is not None else None,
-            "network_adapter": network_adapter_index.get(rid) if network_adapter_index is not None else None,
-            "antivirus_product": antivirus_index.get(rid, []) if antivirus_index is not None else None,
-            "firewall_product": firewall_index.get(rid, []) if firewall_index is not None else None,
-        })
+            matched_devices = device_by_username.get((uname, udomain), []) if uname else []
+        for device in matched_devices:
+            rid = get_resource_id(device)
+            device_key = rid if rid is not None else (
+                device.get('Netbios_Name0') or device.get('Name0') or device.get('netbios_name0')
+            )
+            matched_device_ids.add(device_key)
+            if rid is None:
+                label = device.get('Netbios_Name0') or device.get('Name0') or device.get('netbios_name0') or '?'
+                print(f"  [WARN] merge: device {label!r} has no parseable resource_id -- software/WU data will be empty.")
+            user_fields = {k: v for k, v in row.items() if k not in ('Netbios_Name0', 'netbios_name0')}
+            device_fields = {k: v for k, v in device.items() if k not in ("resource_id", "ResourceID", "ResourceType")}
+            output.append({
+                "resource_id": rid,
+                "device": device_fields,
+                "windows_update": wu_index.get(rid, {}),
+                "installed_software": sw_index.get(rid, []),
+                "user": user_fields,
+                "bitlocker": bitlocker_index.get(rid) if bitlocker_index is not None else None,
+                "screensaver": screensaver_index.get(rid) if screensaver_index is not None else None,
+                "services": services_index.get(rid, []) if services_index is not None else None,
+                "network_adapter": network_adapter_index.get(rid) if network_adapter_index is not None else None,
+                "antivirus_product": antivirus_index.get(rid, []) if antivirus_index is not None else None,
+                "firewall_product": firewall_index.get(rid, []) if firewall_index is not None else None,
+            })
 
     dropped = len(devices) - len(matched_device_ids)
     return output, dropped
