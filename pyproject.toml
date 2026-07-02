@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "databricks-interface"
+version = "0.1.0"
+requires-python = ">=3.8"
+# Kept in sync with requirements.txt (the local/CI install path) -- update both together.
+dependencies = [
+    "databricks-sdk>=0.27,<1.0",
+    "python-dotenv>=1.0",
+    "requests>=2.31,<3.0",
+    "openpyxl>=3.1,<4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+extract-devices = "scripts.extract_devices:main"
+
+[tool.setuptools]
+packages = ["db", "scripts"]
