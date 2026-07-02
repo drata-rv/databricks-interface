@@ -1,0 +1,105 @@
+# Databricks Asset Bundle for the SCCM -> Drata device compliance sync.
+#
+# This job does NO Spark distribution -- all data movement is via the SQL Statement
+# Execution REST API (db/queries.py) and the Drata push is driver-side ThreadPoolExecutor
+# I/O (db/drata_client.py). Compute is deliberately serverless/single-node; do not convert
+# this to a multi-node job cluster, it would just be idle cost.
+#
+# `databricks bundle validate` has NOT been run against this file -- the Databricks CLI is
+# not available in the environment this was authored in. Run it on a machine with the CLI
+# installed before deploying, and expect to fix minor schema issues on the first pass.
+#
+# Three placeholders below block a `prod` target deploy (not `dev`, not writing/reviewing
+# this code): the secret scope name, the job's service-principal identity, and the prod
+# workspace host. See README.md's "Running on Databricks" section for who owns each.
+
+bundle:
+  name: databricks-interface
+
+variables:
+  warehouse_id_prod:
+    description: SQL warehouse ID in the prod workspace (si_prod_catalog tables)
+    default: "487241390a777647"
+  warehouse_id_test:
+    description: SQL warehouse ID in the test workspace (si_test_catalog tables)
+    default: "ed10729e21418123"
+  secret_scope_name:
+    description: >
+      PLACEHOLDER -- pending an admin creating the Databricks secret scope that holds
+      DRATA_API_KEY / DRATA_CONNECTION_ID / DATABRICKS_TOKEN_PROD / DATABRICKS_TOKEN_TEST.
+      Do not deploy until this is set to a real scope name.
+    default: "CHANGE_ME_secret_scope"
+
+artifacts:
+  databricks_interface:
+    type: whl
+    build: python -m build --wheel
+    path: .
+
+resources:
+  jobs:
+    extract_devices_job:
+      name: extract_devices_job
+
+      # Non-secret config only. Table paths, warehouse IDs, and credentials stay
+      # env/secret-driven (see db/secrets.py) rather than becoming job parameters --
+      # credentials must never flow through job parameters or notebook widgets.
+      parameters:
+        - name: full
+          default: "false"
+        - name: sandbox
+          default: "false"
+        - name: test_mode
+          default: "false"
+        - name: dry_run
+          default: "false"
+        - name: limit
+          default: "1000"
+
+      tasks:
+        - task_key: extract_devices
+          # Sized generously above an expected --full run (tens of thousands of users,
+          # chunked 500 at a time) with headroom for cold serverless warehouse starts.
+          # Adjust once a real --full run's wall-clock time is measured.
+          timeout_seconds: 14400
+          # Safe because Drata upserts on externalId (see the duplicate-externalId quality
+          # gate in scripts/extract_devices.py) -- a retried run re-pushes the same data,
+          # it does not create duplicates.
+          max_retries: 1
+          email_notifications:
+            on_failure:
+              - CHANGE_ME_ops_distribution_list@example.com # PLACEHOLDER -- confirm on-call/ops list
+            alert_on_last_attempt: true
+          python_wheel_task:
+            package_name: databricks-interface
+            entry_point: extract-devices
+            parameters:
+              - "--limit"
+              - "{{job.parameters.limit}}"
+          environment_key: default_env
+
+      environments:
+        - environment_key: default_env
+          spec:
+            client: "1"
+            dependencies:
+              - .
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://nationwide-irm-test-ohio.cloud.databricks.com
+    variables:
+      secret_scope_name: "CHANGE_ME_secret_scope"
+
+  prod:
+    mode: production
+    workspace:
+      # PLACEHOLDER -- pending confirmation of the prod deploy target's reachable/authorized
+      # workspace host. See README.md's "Prerequisites before deploying to prod".
+      host: "CHANGE_ME_prod_workspace_host"
+    run_as:
+      # PLACEHOLDER -- pending a named owner for this job's service-principal identity.
+      service_principal_name: "CHANGE_ME_service_principal"
