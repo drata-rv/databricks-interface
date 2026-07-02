@@ -33,9 +33,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from db.auth import get_client_for, load_env
+from db.auth import get_client_for_env, load_env
 from db import queries
 from db.queries import rows_to_records
+from db.secrets import get_secret
 from db.transform import transform_all, apply_test_overrides, apply_sandbox_overrides, decode_security_center_state
 
 load_env()
@@ -586,11 +587,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # Validate required workspace/warehouse config upfront
+    # Validate required non-credential config upfront. Host/token are deliberately NOT
+    # checked here -- they're resolved by get_client_for_env() via db.secrets.get_secret(),
+    # which may source them from a Databricks secret scope rather than a plain env var when
+    # running inside a Databricks Job (where args.host_prod's argparse default would be empty
+    # even though the real value is available). get_client_for_env()/WorkspaceClient() raise
+    # their own clear error if host/token are genuinely unset in either environment.
     missing = [name for name, val in [
         ("--devices (or DATABRICKS_TABLE_DEVICES)", args.devices),
-        ("--host-prod (or DATABRICKS_HOST_PROD)", args.host_prod),
-        ("--host-test (or DATABRICKS_HOST_TEST)", args.host_test),
         ("--warehouse-prod (or DATABRICKS_WAREHOUSE_ID)", args.warehouse_prod),
         ("--warehouse-test (or DATABRICKS_WAREHOUSE_ID_TEST)", args.warehouse_test),
     ] if not val.strip()]
@@ -601,8 +605,8 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
-    prod_client = get_client_for(host=args.host_prod, token=args.token_prod)
-    test_client = get_client_for(host=args.host_test, token=args.token_test)
+    prod_client = get_client_for_env("prod")
+    test_client = get_client_for_env("test")
     default_raw, default_drata = default_output_paths(test_mode=args.test_mode)
     raw_path = Path(args.output_raw) if args.output_raw else default_raw
     drata_path = Path(args.output_drata) if args.output_drata else default_drata
@@ -653,8 +657,8 @@ def main() -> None:
     else:
         print()
 
-    api_key = os.getenv("DRATA_API_KEY", "").strip()
-    connection_id = os.getenv("DRATA_CONNECTION_ID", "").strip()
+    api_key = (get_secret("drata-api-key", env_var="DRATA_API_KEY") or "").strip()
+    connection_id = (get_secret("drata-connection-id", env_var="DRATA_CONNECTION_ID") or "").strip()
 
     # Step 1: load users first (anchor for all downstream scope)
     if args.local_users:

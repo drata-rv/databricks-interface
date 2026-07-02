@@ -1,12 +1,16 @@
 """
 Databricks client factory.
 
-Credential resolution order (handled entirely by the SDK):
+get_client() uses the SDK's own credential resolution order:
   1. Environment variables (DATABRICKS_HOST, DATABRICKS_TOKEN, etc.)
   2. ~/.databrickscfg profile (DATABRICKS_CONFIG_PROFILE selects a non-default profile)
   3. Cloud-native auth (Azure CLI, AWS IAM, GCP service account)
 
-No credentials are accepted or stored here — call sites simply call get_client().
+get_client_for_env() resolves an explicit host+token pair via db.secrets.get_secret(),
+which reads from .env locally or from a Databricks secret scope when running inside a
+Databricks Job (auto-detected via db.secrets.is_databricks_runtime()) -- use this when
+targeting a specific workspace (e.g. separate prod/test catalogs) rather than the
+SDK's default-resolved one.
 """
 
 import os
@@ -14,6 +18,8 @@ from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.config import Config
+
+from db.secrets import get_secret
 
 
 def load_env() -> None:
@@ -45,6 +51,18 @@ def get_client_for(host: str, token: str) -> WorkspaceClient:
     """
     load_env()
     return WorkspaceClient(host=host, token=token)
+
+
+def get_client_for_env(workspace: str) -> WorkspaceClient:
+    """Return an authenticated WorkspaceClient for "prod" or "test", resolving
+    host+token via db.secrets.get_secret() -- .env locally, a Databricks secret
+    scope when running inside a Databricks Job. Composes get_client_for() rather
+    than duplicating the WorkspaceClient construction.
+    """
+    suffix = workspace.upper()
+    host = get_secret(f"databricks-host-{workspace}", env_var=f"DATABRICKS_HOST_{suffix}")
+    token = get_secret(f"databricks-token-{workspace}", env_var=f"DATABRICKS_TOKEN_{suffix}")
+    return get_client_for(host, token)
 
 
 def get_config() -> Config:
