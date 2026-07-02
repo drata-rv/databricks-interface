@@ -2,6 +2,8 @@
 
 Python interface to the Databricks REST API. Authenticates against two Databricks workspaces, pulls SCCM device, user, and endpoint-protection tables through an extensible table registry, joins them per employee, and produces a JSON payload in the Drata Custom Device Connection format.
 
+This project runs both as a local CLI and, once packaged, as a native Databricks Job (`python_wheel_task`) -- see [Running on Databricks](#running-on-databricks-native-job) below.
+
 ---
 
 ## Prerequisites
@@ -164,6 +166,48 @@ python scripts/extract_devices.py --limit 5
 
 ---
 
+## Running on Databricks (native Job)
+
+The same `db/`/`scripts/` code is packaged as a wheel (`pyproject.toml`) and deployed as a `python_wheel_task` inside a Databricks Asset Bundle (`databricks.yml`) -- the job's compute runs inside Databricks (serverless, single-node), not merely triggered externally while running elsewhere. There is no Spark distribution in this job; all data movement is via the SQL Statement Execution API and the Drata push is driver-side, exactly as it is locally.
+
+Credentials are resolved automatically depending on where the code runs, via `db/secrets.py::get_secret()` and `db/auth.py::get_client_for_env()`:
+- Inside a Databricks Job (detected via the `DATABRICKS_RUNTIME_VERSION` environment variable Databricks sets on all clusters and serverless compute): credentials come from a Databricks secret scope (`DATABRICKS_SECRET_SCOPE`).
+- Locally: the existing `.env` behavior is completely unchanged.
+
+Nothing else in the codebase needs to know which environment it's running in -- this is the only place that branches on it.
+
+### Deploying
+
+```bash
+databricks bundle validate
+databricks bundle deploy -t dev
+databricks bundle run extract_devices_job -t dev
+```
+
+### CLI flags -> job parameters
+
+| CLI flag | Job parameter |
+|---|---|
+| `--full` | `full` |
+| `--sandbox` | `sandbox` |
+| `--test-mode` | `test_mode` |
+| `--dry-run` | `dry_run` |
+| `--limit` | `limit` |
+
+Table paths, warehouse IDs, and credentials are **not** job parameters -- they stay env/secret-driven, so there's one configuration surface instead of two, and credentials never flow through job parameters or notebook widgets.
+
+### Prerequisites before deploying to `prod`
+
+None of the following block writing or merging code -- they block only the `prod` target deploy:
+
+- **Confirm whether `nationwide-irm-prod-ohio` and `nationwide-irm-test-ohio` share a Unity Catalog metastore** -- requires a Databricks account admin; cannot be checked with a workspace-scoped token.
+- **Assign a named owner for the job's service-principal identity** -- requires a decision on Nationwide's side.
+- **File a network egress allowlisting request for `public-api.drata.com`** from the compute chosen for this job -- separate ticket, has external lead time.
+
+`databricks.yml` marks each corresponding placeholder value with a `CHANGE_ME_` prefix and a comment naming which of the above blocks it.
+
+---
+
 ## What the ETL Does
 
 1. Loads users first, from `DATABRICKS_TABLE_USERS` or the local xlsx via `--local-users` -- users anchor everything downstream
@@ -208,15 +252,21 @@ Each step prints `[OK]`, `[FAIL]`, or `[SKIP]`. Steps are independent -- a failu
 
 ```
 db/
-  auth.py            -- WorkspaceClient factory; reads credentials from environment
+  __init__.py
+  auth.py            -- WorkspaceClient factory; get_client_for_env() resolves credentials via db/secrets.py
+  secrets.py         -- Credential resolution: .env locally, Databricks secret scope inside a Job
   queries.py         -- Catalog browsing, SQL execution, result helpers
   transform.py       -- Feature extraction (extract_features) and Drata format assembly (format_for_drata)
   drata_client.py    -- Drata Custom Device Connection API client
 scripts/
+  __init__.py
   test_connection.py -- Connectivity probe and single-table export
   extract_devices.py -- ETL: pull via registry, user-centric merge, transform, write, push
+tests/               -- pytest suite; mocks WorkspaceClient, no network access required
 output/              -- Extracted JSON files (git-ignored)
 .env.example         -- Credential and config template (pre-filled)
+pyproject.toml       -- Package definition + extract-devices console script entry point
+databricks.yml       -- Databricks Asset Bundle (native Job deployment)
 requirements.txt
 ```
 
@@ -231,3 +281,5 @@ The SDK resolves credentials in this order with no code changes required:
 3. Cloud-native auth (Azure CLI, AWS IAM, GCP service account)
 
 Set the appropriate environment variables in your CI/CD or orchestration platform to use the same scripts in deployed contexts.
+
+When running inside a Databricks Job, `DRATA_API_KEY` and both workspace tokens are additionally resolvable via `dbutils.secrets.get()` against the scope named by `DATABRICKS_SECRET_SCOPE` -- see `db/secrets.py`.
