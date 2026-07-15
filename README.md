@@ -42,9 +42,11 @@ GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `user@example.com`;
 GRANT SELECT ON SCHEMA <catalog>.<schema> TO `user@example.com`;
 ```
 
-### 4. (Production) Service Principal
+### 4. (Production) Service Principal / OAuth M2M
 
-In the Databricks account console go to **User management > Service principals > Add service principal**. Generate a client secret and grant it the same permissions above. Use `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`, and `DATABRICKS_AZURE_TENANT_ID` in place of `DATABRICKS_TOKEN`.
+Nationwide's security policy prefers OAuth over a personal access token (confirmed by Terry Hardaway, 2026-07-13). In the Databricks account console go to **User management > Service principals > Add service principal**, generate a client secret, and grant it the same permissions above. Databricks service-principal OAuth M2M tokens only support one scope -- `all-apis` -- there is no finer-grained scope to request.
+
+Set `DATABRICKS_CLIENT_ID_PROD`/`DATABRICKS_CLIENT_SECRET_PROD` and `DATABRICKS_CLIENT_ID_TEST`/`DATABRICKS_CLIENT_SECRET_TEST` per workspace. `get_client_for_env()` in `db/auth.py` prefers these over the matching `DATABRICKS_TOKEN_*` automatically when both are set -- no flag or code change needed to switch. Leave them unset to keep using a PAT (e.g. local dev without a provisioned service principal).
 
 ---
 
@@ -100,6 +102,9 @@ The `.env.example` file is pre-filled with all known workspace URLs, warehouse I
 | `DATABRICKS_TABLE_SCREENSAVER` | No | Path to screensaver settings table -- enables `screenLockEnabled` |
 | `DATABRICKS_TABLE_SERVICES` | No | Path to Windows services table -- enables `firewallEnabled`, `windowsServices` |
 | `DATABRICKS_TABLE_NETWORK_ADAPTER` | No | Path to network adapter config table -- enables `macAddress` |
+| `DATABRICKS_CLIENT_ID_PROD` / `_TEST` | No | Service-principal application ID; takes priority over the matching `DATABRICKS_TOKEN_*` when both `CLIENT_ID` and `CLIENT_SECRET` are set |
+| `DATABRICKS_CLIENT_SECRET_PROD` / `_TEST` | No | Service-principal OAuth secret (paired with `CLIENT_ID` above) |
+| `DATABRICKS_SECRET_SCOPE_PROD` / `_TEST` | No | Databricks secret scope name per workspace; only consulted inside a Databricks Job (see `db/secrets.py`) |
 
 *`DRATA_API_KEY` and `DRATA_CONNECTION_ID` are required for the Drata push step. If either is unset, the pipeline writes JSON output but skips the push (equivalent to `--dry-run`).
 
@@ -171,8 +176,10 @@ python scripts/extract_devices.py --limit 5
 The same `db/`/`scripts/` code is packaged as a wheel (`pyproject.toml`) and deployed as a `python_wheel_task` inside a Databricks Asset Bundle (`databricks.yml`) -- the job's compute runs inside Databricks (serverless, single-node), not merely triggered externally while running elsewhere. There is no Spark distribution in this job; all data movement is via the SQL Statement Execution API and the Drata push is driver-side, exactly as it is locally.
 
 Credentials are resolved automatically depending on where the code runs, via `db/secrets.py::get_secret()` and `db/auth.py::get_client_for_env()`:
-- Inside a Databricks Job (detected via the `DATABRICKS_RUNTIME_VERSION` environment variable Databricks sets on all clusters and serverless compute): credentials come from a Databricks secret scope (`DATABRICKS_SECRET_SCOPE`).
+- Inside a Databricks Job (detected via the `DATABRICKS_RUNTIME_VERSION` environment variable Databricks sets on all clusters and serverless compute): credentials come from a Databricks secret scope -- one per workspace (`DATABRICKS_SECRET_SCOPE_PROD`/`_TEST`), since Nationwide provisions them separately rather than sharing one scope.
 - Locally: the existing `.env` behavior is completely unchanged.
+
+Within either environment, OAuth M2M (service-principal `client_id`/`client_secret`) is preferred over a personal access token whenever both are present, falling back to PAT otherwise -- see [Service Principal / OAuth M2M](#4-production-service-principal--oauth-m2m) above.
 
 Nothing else in the codebase needs to know which environment it's running in -- this is the only place that branches on it.
 
@@ -282,4 +289,4 @@ The SDK resolves credentials in this order with no code changes required:
 
 Set the appropriate environment variables in your CI/CD or orchestration platform to use the same scripts in deployed contexts.
 
-When running inside a Databricks Job, `DRATA_API_KEY` and both workspace tokens are additionally resolvable via `dbutils.secrets.get()` against the scope named by `DATABRICKS_SECRET_SCOPE` -- see `db/secrets.py`.
+`get_client_for_env()` (used by the ETL pipeline, not `test_connection.py`) layers its own resolution on top: when running inside a Databricks Job, credentials are additionally resolvable via `dbutils.secrets.get()` against a per-workspace scope (`DATABRICKS_SECRET_SCOPE_PROD`/`_TEST`) -- see `db/secrets.py`. Within that resolution, OAuth M2M (`databricks-client-id-{workspace}` + `databricks-client-secret-{workspace}`) takes priority over a PAT (`databricks-token-{workspace}`) whenever both are present.

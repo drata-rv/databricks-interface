@@ -88,3 +88,50 @@ def test_get_client_for_env_resolves_per_workspace():
     finally:
         for k in ("DATABRICKS_HOST_PROD", "DATABRICKS_TOKEN_PROD", "DATABRICKS_HOST_TEST", "DATABRICKS_TOKEN_TEST"):
             os.environ.pop(k, None)
+
+
+def test_get_client_for_oauth_passes_through_credentials():
+    with mock.patch("db.auth.WorkspaceClient") as MockWC:
+        auth.get_client_for_oauth("https://x.example.com", "client-id-123", "client-secret-abc")
+        MockWC.assert_called_once_with(
+            host="https://x.example.com", client_id="client-id-123",
+            client_secret="client-secret-abc", auth_type="oauth-m2m",
+        )
+
+
+def test_get_client_for_env_prefers_oauth_over_token_when_both_set():
+    os.environ.pop("DATABRICKS_RUNTIME_VERSION", None)
+    os.environ.update({
+        "DATABRICKS_HOST_PROD": "https://prod.example.com",
+        "DATABRICKS_TOKEN_PROD": "prod-tok",
+        "DATABRICKS_CLIENT_ID_PROD": "prod-client-id",
+        "DATABRICKS_CLIENT_SECRET_PROD": "prod-client-secret",
+    })
+    try:
+        with mock.patch("db.auth.WorkspaceClient") as MockWC:
+            auth.get_client_for_env("prod")
+            MockWC.assert_called_once_with(
+                host="https://prod.example.com", client_id="prod-client-id",
+                client_secret="prod-client-secret", auth_type="oauth-m2m",
+            )
+    finally:
+        for k in ("DATABRICKS_HOST_PROD", "DATABRICKS_TOKEN_PROD",
+                  "DATABRICKS_CLIENT_ID_PROD", "DATABRICKS_CLIENT_SECRET_PROD"):
+            os.environ.pop(k, None)
+
+
+def test_get_client_for_env_falls_back_to_token_when_client_credentials_partial():
+    """Only client_id set (no secret) must not attempt OAuth -- falls back to token."""
+    os.environ.pop("DATABRICKS_RUNTIME_VERSION", None)
+    os.environ.update({
+        "DATABRICKS_HOST_PROD": "https://prod.example.com",
+        "DATABRICKS_TOKEN_PROD": "prod-tok",
+        "DATABRICKS_CLIENT_ID_PROD": "prod-client-id",
+    })
+    try:
+        with mock.patch("db.auth.WorkspaceClient") as MockWC:
+            auth.get_client_for_env("prod")
+            MockWC.assert_called_once_with(host="https://prod.example.com", token="prod-tok")
+    finally:
+        for k in ("DATABRICKS_HOST_PROD", "DATABRICKS_TOKEN_PROD", "DATABRICKS_CLIENT_ID_PROD"):
+            os.environ.pop(k, None)

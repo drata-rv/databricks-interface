@@ -9,9 +9,21 @@
 # not available in the environment this was authored in. Run it on a machine with the CLI
 # installed before deploying, and expect to fix minor schema issues on the first pass.
 #
-# Three placeholders below block a `prod` target deploy (not `dev`, not writing/reviewing
-# this code): the secret scope name, the job's service-principal identity, and the prod
-# workspace host. See README.md's "Running on Databricks" section for who owns each.
+# KNOWN GAP: this skeleton does not yet wire task-level environment variables (table paths,
+# DATABRICKS_SECRET_SCOPE_PROD/_TEST, etc.) into the running process -- the variables above
+# are declared but not yet consumed by the job spec. Confirm the correct mechanism for a
+# python_wheel_task on serverless compute (environments.spec may need an env/vars key, or
+# this may require a base_parameters-style passthrough) once validated against a real CLI.
+#
+# Four placeholders below block a `prod` target deploy (not `dev`, not writing/reviewing
+# this code): the two per-workspace secret scope names, the job's service-principal identity,
+# and the prod workspace host. See README.md's "Running on Databricks" section for who owns each.
+#
+# Auth: Nationwide's security policy prefers OAuth M2M (service principal) over a personal
+# access token -- confirmed by Terry Hardaway 2026-07-13. db/auth.py's get_client_for_env()
+# prefers OAuth when a scope holds both databricks-client-id-{prod,test} and
+# databricks-client-secret-{prod,test}, falling back to databricks-token-{prod,test} (PAT)
+# otherwise. Nationwide provisions one secret scope per workspace, not one shared scope.
 
 bundle:
   name: databricks-interface
@@ -23,12 +35,19 @@ variables:
   warehouse_id_test:
     description: SQL warehouse ID in the test workspace (si_test_catalog tables)
     default: "ed10729e21418123"
-  secret_scope_name:
+  secret_scope_name_prod:
     description: >
-      PLACEHOLDER -- pending an admin creating the Databricks secret scope that holds
-      DRATA_API_KEY / DRATA_CONNECTION_ID / DATABRICKS_TOKEN_PROD / DATABRICKS_TOKEN_TEST.
-      Do not deploy until this is set to a real scope name.
-    default: "CHANGE_ME_secret_scope"
+      PLACEHOLDER -- Nationwide confirmed this scope was created 2026-07-13 but has not yet
+      sent the actual name. Holds databricks-client-id-prod / databricks-client-secret-prod
+      (or databricks-token-prod as a PAT fallback) plus DRATA_API_KEY / DRATA_CONNECTION_ID.
+      Do not deploy until this is set to the real scope name.
+    default: "CHANGE_ME_secret_scope_prod"
+  secret_scope_name_test:
+    description: >
+      PLACEHOLDER -- same as secret_scope_name_prod above, for the test workspace's
+      databricks-client-id-test / databricks-client-secret-test (or databricks-token-test).
+      Do not deploy until this is set to the real scope name.
+    default: "CHANGE_ME_secret_scope_test"
 
 artifacts:
   databricks_interface:
@@ -92,7 +111,8 @@ targets:
     workspace:
       host: https://nationwide-irm-test-ohio.cloud.databricks.com
     variables:
-      secret_scope_name: "CHANGE_ME_secret_scope"
+      secret_scope_name_prod: "CHANGE_ME_secret_scope_prod"
+      secret_scope_name_test: "CHANGE_ME_secret_scope_test"
 
   prod:
     mode: production
@@ -101,5 +121,7 @@ targets:
       # workspace host. See README.md's "Prerequisites before deploying to prod".
       host: "CHANGE_ME_prod_workspace_host"
     run_as:
-      # PLACEHOLDER -- pending a named owner for this job's service-principal identity.
+      # PLACEHOLDER -- pending a named owner for this job's service-principal identity. Once
+      # named, this is also the OAuth M2M service principal Nationwide provisions per the
+      # auth note above.
       service_principal_name: "CHANGE_ME_service_principal"
