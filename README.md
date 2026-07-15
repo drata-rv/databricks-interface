@@ -12,7 +12,7 @@ This project runs both as a local CLI and, once packaged, as a native Databricks
 - Two Databricks workspaces (prod and test) with Unity Catalog enabled
 - A running SQL warehouse in each workspace (Serverless or Pro tier)
 - An account with `CAN USE` on each warehouse and `SELECT` on the target catalogs and schemas
-- A personal access token for each workspace (or a shared token if both workspaces accept the same one)
+- A personal access token for each workspace, or OAuth service-principal credentials if preferred (see step 4 below) -- a shared token also works if both workspaces accept the same one
 
 ---
 
@@ -42,7 +42,7 @@ GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `user@example.com`;
 GRANT SELECT ON SCHEMA <catalog>.<schema> TO `user@example.com`;
 ```
 
-### 4. (Production) Service Principal / OAuth M2M
+### 4. Service Principal / OAuth M2M
 
 Nationwide's security policy prefers OAuth over a personal access token (confirmed by Terry Hardaway, 2026-07-13). In the Databricks account console go to **User management > Service principals > Add service principal**, generate a client secret, and grant it the same permissions above. Databricks service-principal OAuth M2M tokens only support one scope -- `all-apis` -- there is no finer-grained scope to request.
 
@@ -73,7 +73,7 @@ cp .env.example .env        # Mac/Linux
 copy .env.example .env      # Windows
 ```
 
-The `.env.example` file is pre-filled with all known workspace URLs, warehouse IDs, and table paths. The only values you need to supply are the tokens.
+The `.env.example` file is pre-filled with all known workspace URLs, warehouse IDs, and table paths. The only values you need to supply are your own credentials (tokens, or OAuth client ID/secret if you have them).
 
 ---
 
@@ -180,7 +180,7 @@ Credentials are resolved automatically depending on where the code runs, via `db
 - Inside a Databricks Job (detected via the `DATABRICKS_RUNTIME_VERSION` environment variable Databricks sets on all clusters and serverless compute): credentials come from a Databricks secret scope -- one per workspace (`DATABRICKS_SECRET_SCOPE_PROD`/`_TEST`), since Nationwide provisions them separately rather than sharing one scope.
 - Locally: the existing `.env` behavior is completely unchanged.
 
-Within either environment, OAuth M2M (service-principal `client_id`/`client_secret`) is preferred over a personal access token whenever both are present, falling back to PAT otherwise -- see [Service Principal / OAuth M2M](#4-production-service-principal--oauth-m2m) above.
+Within either environment, OAuth M2M (service-principal `client_id`/`client_secret`) is preferred over a personal access token whenever both are present, falling back to PAT otherwise -- see [Service Principal / OAuth M2M](#4-service-principal--oauth-m2m) above.
 
 Nothing else in the codebase needs to know which environment it's running in -- this is the only place that branches on it.
 
@@ -192,27 +192,32 @@ databricks bundle deploy -t dev
 databricks bundle run extract_devices_job -t dev
 ```
 
+`databricks bundle validate` has not been run against a real Databricks CLI yet -- unavailable in the environment this bundle was authored in. Expect to fix minor schema issues on the first real pass.
+
+### Known gaps in this skeleton
+
+- Task-level environment variables (table paths, `DATABRICKS_SECRET_SCOPE_PROD`/`_TEST`, etc.) are not yet wired into the running process -- `databricks.yml` declares them but the job spec doesn't consume them. The correct mechanism for a `python_wheel_task` on serverless compute (an `environments.spec` env key, or a different passthrough) still needs to be confirmed against a real CLI.
+- Only `--limit` is currently forwarded to the wheel task's entry point (see `python_wheel_task.parameters` in `databricks.yml`). `--full`, `--sandbox`, `--test-mode`, and `--dry-run` are declared as job parameters (table below) but not yet passed through -- these are `store_true` flags with no value, so forwarding them needs either an argparse change (accept an explicit `true`/`false`) or a different plumbing approach. Not yet decided.
+
 ### CLI flags -> job parameters
 
-| CLI flag | Job parameter |
-|---|---|
-| `--full` | `full` |
-| `--sandbox` | `sandbox` |
-| `--test-mode` | `test_mode` |
-| `--dry-run` | `dry_run` |
-| `--limit` | `limit` |
+| CLI flag | Job parameter | Wired today? |
+|---|---|---|
+| `--limit` | `limit` | Yes |
+| `--full` | `full` | No -- see Known gaps above |
+| `--sandbox` | `sandbox` | No -- see Known gaps above |
+| `--test-mode` | `test_mode` | No -- see Known gaps above |
+| `--dry-run` | `dry_run` | No -- see Known gaps above |
 
-Table paths, warehouse IDs, and credentials are **not** job parameters -- they stay env/secret-driven, so there's one configuration surface instead of two, and credentials never flow through job parameters or notebook widgets.
+Table paths, warehouse IDs, and credentials are **not** job parameters by design -- they stay env/secret-driven, so there's one configuration surface instead of two, and credentials never flow through job parameters or notebook widgets.
 
 ### Prerequisites before deploying to `prod`
 
-None of the following block writing or merging code -- they block only the `prod` target deploy:
+None of the following block writing or merging code -- they block only the `prod` target deploy. Terry Hardaway (Nationwide) replied 2026-07-13:
 
-- **Confirm whether `nationwide-irm-prod-ohio` and `nationwide-irm-test-ohio` share a Unity Catalog metastore** -- requires a Databricks account admin; cannot be checked with a workspace-scoped token.
-- **Assign a named owner for the job's service-principal identity** -- requires a decision on Nationwide's side.
-- **File a network egress allowlisting request for `public-api.drata.com`** from the compute chosen for this job -- separate ticket, has external lead time.
-
-`databricks.yml` marks each corresponding placeholder value with a `CHANGE_ME_` prefix and a comment naming which of the above blocks it.
+- Tables will be available in `nationwide-irm-prod-ohio` once prod switches over -- confirmed, no further action needed.
+- Egress to `public-api.drata.com` is clear -- confirmed, no further action needed.
+- **Still open**: the actual secret scope names for the Test and Production scopes Terry confirmed were created, and a named owner/application ID for the OAuth service-principal identity. `databricks.yml` marks the corresponding placeholders with a `CHANGE_ME_` prefix.
 
 ---
 
@@ -220,7 +225,7 @@ None of the following block writing or merging code -- they block only the `prod
 
 1. Loads users first, from `DATABRICKS_TABLE_USERS` or the local xlsx via `--local-users` -- users anchor everything downstream
 2. Filters users against Drata personnel status, keeping only current employees and contractors
-3. Processes users in chunks of 500: pulls devices scoped to that chunk (excluding servers, VMs, and decommissioned/inactive machines), then pulls secondary tables (Windows Update, installed software, antivirus, firewall) via `TABLE_REGISTRY`
+3. Processes users in chunks of 500: pulls devices scoped to that chunk (excluding servers, VMs, and decommissioned/inactive machines), then pulls secondary tables (Windows Update, installed software, antivirus, firewall, encrypted volume, computer system) via `TABLE_REGISTRY`
 4. Merges using users as the anchor (inner join): only devices with a matched user record are included; unmatched devices are counted and logged
 5. Extracts the Drata monitoring signals from the merged data (antivirus, auto-update, password manager, encryption; screen lock remains null pending an additional SCCM table)
 6. Formats each merged record into the Drata Custom Device Connection JSON shape
