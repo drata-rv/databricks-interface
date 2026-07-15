@@ -120,8 +120,12 @@ TABLE_REGISTRY = [
     # only -- transform.py has no reference to it, so it cannot reach the Drata push payload.
     TableSpec('antivirus_product',  'DATABRICKS_TABLE_ANTIVIRUS',           'test', 'resource_id', False, True),
     TableSpec('firewall_product',   'DATABRICKS_TABLE_FIREWALL',            'test', 'resource_id', False, True),
+    # Confirmed 2026-07-15 (SCCM Test Tables - Updated 7-15.xlsx): t_sccm_gs_encryptable_volume
+    # feeds encryptionEnabled (protection_status0); t_sccm_gs_computer_system feeds a real
+    # hardware model (model0), fixing the prior CPU-type-as-model bug.
+    TableSpec('bitlocker',          'DATABRICKS_TABLE_BITLOCKER',           'test', 'resource_id', False, False),
+    TableSpec('computer_system',    'DATABRICKS_TABLE_COMPUTER_SYSTEM',     'test', 'resource_id', False, False),
     # Uncomment when Nationwide confirms table names:
-    # TableSpec('bitlocker',       'DATABRICKS_TABLE_BITLOCKER',       'test', 'resource_id', False, False),
     # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'test', 'resource_id', False, False),
     # TableSpec('services',        'DATABRICKS_TABLE_SERVICES',        'test', 'resource_id', False, False),
     # TableSpec('network_adapter', 'DATABRICKS_TABLE_NETWORK_ADAPTER', 'test', 'resource_id', False, False),
@@ -285,6 +289,7 @@ def merge(
     network_adapter: Optional[List[Dict[str, Any]]] = None,
     antivirus_product: Optional[List[Dict[str, Any]]] = None,
     firewall_product: Optional[List[Dict[str, Any]]] = None,
+    computer_system: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
     Inner join: users are the anchor. Only devices with a matched user are included.
@@ -378,6 +383,14 @@ def merge(
                 entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
                 firewall_index.setdefault(rid, []).append(entry)
 
+    computer_system_index: Optional[Dict[int, Dict[str, Any]]] = None
+    if computer_system is not None:
+        computer_system_index = {}
+        for row in computer_system:
+            rid = get_resource_id(row)
+            if rid is not None:
+                computer_system_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+
     # User-centric iteration: users anchor the output set.
     # Try Netbios join first (xlsx path), fall back to username+domain join (Databricks path).
     # A user can match more than one device on the Databricks path -- each produces its own
@@ -416,6 +429,7 @@ def merge(
                 "network_adapter": network_adapter_index.get(rid) if network_adapter_index is not None else None,
                 "antivirus_product": antivirus_index.get(rid, []) if antivirus_index is not None else None,
                 "firewall_product": firewall_index.get(rid, []) if firewall_index is not None else None,
+                "computer_system": computer_system_index.get(rid) if computer_system_index is not None else None,
             })
 
     dropped = len(devices) - len(matched_device_ids)
@@ -838,6 +852,7 @@ def main() -> None:
             network_adapter=pulled.get('network_adapter'),
             antivirus_product=pulled.get('antivirus_product'),
             firewall_product=pulled.get('firewall_product'),
+            computer_system=pulled.get('computer_system'),
         )
         print(f"  {len(merged_chunk)} records assembled.")
         if dropped:

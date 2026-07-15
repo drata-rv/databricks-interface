@@ -9,14 +9,16 @@ Fields populated from current data sources:
   alias, externalId, serialNumber, model, platformName, platformVersion,
   appList, antivirusEnabled, antivirusExplanation,
   autoUpdateEnabled, autoUpdateExplanation,
-  passwordManagerEnabled, passwordManagerExplanation
+  passwordManagerEnabled, passwordManagerExplanation,
+  encryptionEnabled, encryptionExplanation -- t_sccm_gs_encryptable_volume (protection_status0)
+  model prefers t_sccm_gs_computer_system (model0); falls back to the device table's CPU
+  type string only when that table is absent (not a real chassis model, but better than null)
 
 Fields populated from the user identity table (joined on Netbios_Name0):
   personnelId          -- User_Princiipal_Name0 (source column has the double-i typo)
 
 Fields set to null -- require additional SCCM tables (uncomment in TABLE_REGISTRY to enable):
   firewallEnabled      -- needs t_sccm_gs_services (mpssvc / Windows Firewall service)
-  encryptionEnabled    -- needs t_sccm_gs_bitlockerdetails (ProtectionStatus, EncryptionPercentage)
   screenLockEnabled    -- needs t_sccm_gs_screensaversettings (IsEnabled, IsSecure, WaitInterval)
   windowsServices      -- needs t_sccm_gs_services
   macAddress           -- needs t_sccm_gs_networkadapterconfiguration
@@ -233,26 +235,44 @@ def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _extract_encryption(
-    bitlocker: Optional[Dict[str, Any]],
+    encrypted_volume: Optional[Dict[str, Any]],
 ) -> Tuple[Optional[bool], Optional[Dict[str, Any]]]:
-    """Derive encryptionEnabled from a BitLocker details row. Returns (None, None) if table absent."""
-    if not bitlocker:
+    """Derive encryptionEnabled from a t_sccm_gs_encryptable_volume (BitLocker) row.
+
+    Returns (None, None) if the table is absent. This table has no percentage-equivalent
+    column -- protection_status0 == 1 (the MicrosoftEncryptableVolume WMI convention: 0 =
+    Unprotected, 1 = Protected, 2 = Unknown) is itself the correct signal here, not a
+    compromise for the percentage check an earlier, differently-named table would have had.
+    """
+    if not encrypted_volume:
         return None, None
-    protected = str(bitlocker.get('ProtectionStatus') or '').strip()
-    pct_raw = bitlocker.get('EncryptionPercentage')
-    try:
-        pct = int(pct_raw) if pct_raw is not None else None
-    except (ValueError, TypeError):
-        pct = None
-    enabled = protected == '1' and pct == 100
+    protected = str(encrypted_volume.get('protection_status0') or '').strip()
+    enabled = protected == '1'
     explanation = {
         'bootPartitionEncryptionDetails': {
-            'partitionFileVault2Percent': pct,
+            'partitionFileVault2Percent': 100 if enabled else None,
             'partitionFileVault2State': 'ENCRYPTED' if enabled else 'DECRYPTED',
-            'partitionName': bitlocker.get('DriveLetter') or 'C:',
+            'partitionName': encrypted_volume.get('drive_letter0') or 'C:',
         }
     }
     return enabled, explanation
+
+
+def _extract_model(
+    device: Dict[str, Any],
+    computer_system: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Return the hardware model, preferring t_sccm_gs_computer_system's model0.
+
+    Falls back to the device table's CPU type string only when the Computer System table
+    is absent for this device -- not a real chassis model, but preserves the pre-existing
+    (if inaccurate) behavior rather than returning null outright.
+    """
+    if computer_system:
+        model = computer_system.get('model0')
+        if model:
+            return model
+    return device.get('CPUType0') or device.get('cpu_type0')
 
 
 def _extract_screen_lock(
@@ -357,11 +377,13 @@ def extract_features(merged: Dict[str, Any]) -> Dict[str, Any]:
     fw_enabled, fw_explanation = _extract_firewall(merged.get('services'))
     enc_enabled, enc_explanation = _extract_encryption(merged.get('bitlocker'))
     sl_enabled, sl_explanation, sl_time = _extract_screen_lock(merged.get('screensaver'))
+    model = _extract_model(device, merged.get('computer_system'))
 
     return {
         'resource_id': merged.get('resource_id'),
         'device': device,
         'user': user,
+        'model': model,
         'av_enabled': av_enabled,
         'av_apps': av_apps,
         'pm_enabled': pm_enabled,
@@ -402,7 +424,7 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
             or device.get('AADDeviceID') or device.get('aad_device_id')
             or (str(features['resource_id']) if features.get('resource_id') is not None else None)
         ),
-        'model': device.get('CPUType0'),
+        'model': features['model'],
         'macAddress': features['mac_address'],
         'platformName': _platform_name(device.get('Operating_System_Name_and0')),
         'platformVersion': device.get('Build01') or device.get('BuildExt') or 'Unknown',
