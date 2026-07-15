@@ -94,7 +94,8 @@ The `.env.example` file is pre-filled with all known workspace URLs, warehouse I
 | `DATABRICKS_TOKEN` | No | Shared token fallback used by both workspaces if workspace-specific vars are not set |
 | `DRATA_API_KEY` | No* | Drata public API Bearer token |
 | `DRATA_CONNECTION_ID` | No* | UUID of the Custom Device Connection in Drata |
-| `DATABRICKS_TABLE_BITLOCKER` | No | Path to BitLocker details table -- enables `encryptionEnabled` |
+| `DATABRICKS_TABLE_BITLOCKER` | No | Path to t_sccm_gs_encryptable_volume -- enables `encryptionEnabled` (`protection_status0`) |
+| `DATABRICKS_TABLE_COMPUTER_SYSTEM` | No | Path to t_sccm_gs_computer_system -- enables a real hardware `model` (`model0`); falls back to CPU type if absent |
 | `DATABRICKS_TABLE_SCREENSAVER` | No | Path to screensaver settings table -- enables `screenLockEnabled` |
 | `DATABRICKS_TABLE_SERVICES` | No | Path to Windows services table -- enables `firewallEnabled`, `windowsServices` |
 | `DATABRICKS_TABLE_NETWORK_ADAPTER` | No | Path to network adapter config table -- enables `macAddress` |
@@ -170,7 +171,7 @@ python scripts/extract_devices.py --limit 5
 2. Filters users against Drata personnel status, keeping only current employees and contractors
 3. Processes users in chunks of 500: pulls devices scoped to that chunk (excluding servers, VMs, and decommissioned/inactive machines), then pulls secondary tables (Windows Update, installed software, antivirus, firewall) via `TABLE_REGISTRY`
 4. Merges using users as the anchor (inner join): only devices with a matched user record are included; unmatched devices are counted and logged
-5. Extracts the Drata monitoring signals from the merged data (antivirus, auto-update, password manager; encryption and screen lock remain null pending additional SCCM tables)
+5. Extracts the Drata monitoring signals from the merged data (antivirus, auto-update, password manager, encryption; screen lock remains null pending an additional SCCM table)
 6. Formats each merged record into the Drata Custom Device Connection JSON shape
 7. Applies pre-push quality gates -- records missing a personnelId, appList, or externalId are excluded and written to `_rejected.json` instead of being pushed
 8. Writes all output files
