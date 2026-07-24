@@ -32,3 +32,15 @@ If Databricks moves the job to a different `client`/`environment_version` with a
 Python version (see `databricks.yml`'s `environment_key`), update `--python-version`/`--abi`
 here to match -- check the current mapping at
 https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/.
+
+## Deliberately excluded: protobuf, cryptography, cffi, pycparser
+
+After the regeneration command above, delete these four from the output before committing.
+Databricks' own serverless kernel bootstrap (`dbruntime`) depends on grpc/protobuf internally,
+and vendoring a newer protobuf than what's already installed overwrites it -- this broke the
+Python kernel outright ("Failed to restart Python... may be due to updating the version of a
+core Python package", `ModuleNotFoundError: dbruntime.overlay_magic`) on a real run 2026-07-24.
+`cryptography`/`cffi`/`pycparser` are only pulled in transitively via `google-auth`'s
+`cryptography` requirement -- with protobuf excluded, letting the environment's own
+already-installed versions satisfy `databricks-sdk`'s and `google-auth`'s version constraints
+avoids the conflict without needing to know the exact "safe" version to pin.
