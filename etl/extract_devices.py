@@ -15,9 +15,9 @@ Table configuration:
   - Adding a new SCCM table: uncomment one registry line, set the env var.
 
 Usage:
-    python scripts/extract_devices.py
-    python scripts/extract_devices.py --dry-run   # full pipeline, skip Drata push
-    python scripts/extract_devices.py --debug     # print resolved env before running
+    python etl/extract_devices.py
+    python etl/extract_devices.py --dry-run   # full pipeline, skip Drata push
+    python etl/extract_devices.py --debug     # print resolved env before running
 """
 
 import argparse

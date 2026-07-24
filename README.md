@@ -122,19 +122,19 @@ For `test_connection.py`, which uses the SDK's single-workspace credential chain
 Run this first to confirm auth, warehouse access, and table visibility before running the full ETL:
 
 ```bash
-python scripts/test_connection.py
+python etl/test_connection.py
 ```
 
 To pull a sample from a specific table and inspect the raw data:
 
 ```bash
-python scripts/test_connection.py --table catalog.schema.table_name --limit 10
+python etl/test_connection.py --table catalog.schema.table_name --limit 10
 ```
 
 ### Step 2: Run the ETL
 
 ```bash
-python scripts/extract_devices.py
+python etl/extract_devices.py
 ```
 
 Up to three output files are written per run:
@@ -157,7 +157,7 @@ Useful flags:
 A typical sandbox test run combines several of these:
 
 ```bash
-python scripts/extract_devices.py --local-users --test-mode --full --sandbox
+python etl/extract_devices.py --local-users --test-mode --full --sandbox
 ```
 
 ### Step 3: Push to Drata
@@ -167,14 +167,14 @@ Set `DRATA_API_KEY` and `DRATA_CONNECTION_ID` in `.env`, then run without `--dry
 To push a small batch first and verify records appear in Drata before a full run:
 
 ```bash
-python scripts/extract_devices.py --limit 5
+python etl/extract_devices.py --limit 5
 ```
 
 ---
 
 ## Running on Databricks (native Job)
 
-The same `db/`/`scripts/` code is packaged as a wheel (`pyproject.toml`) and deployed as a `python_wheel_task` inside a Databricks Asset Bundle (`databricks.yml`) -- the job's compute runs inside Databricks (serverless, single-node), not merely triggered externally while running elsewhere. There is no Spark distribution in this job; all data movement is via the SQL Statement Execution API and the Drata push is driver-side, exactly as it is locally.
+The same `db/`/`etl/` code is packaged as a wheel (`pyproject.toml`) and deployed as a `python_wheel_task` inside a Databricks Asset Bundle (`databricks.yml`) -- the job's compute runs inside Databricks (serverless, single-node), not merely triggered externally while running elsewhere. There is no Spark distribution in this job; all data movement is via the SQL Statement Execution API and the Drata push is driver-side, exactly as it is locally.
 
 Credentials are resolved automatically depending on where the code runs, via `db/secrets.py::get_secret()` and `db/auth.py::get_client_for_env()`:
 - Inside a Databricks Job (detected via the `DATABRICKS_RUNTIME_VERSION` environment variable Databricks sets on all clusters and serverless compute): credentials come from a Databricks secret scope -- one per workspace (`DATABRICKS_SECRET_SCOPE_PROD`/`_TEST`), since Nationwide provisions them separately rather than sharing one scope.
@@ -186,13 +186,16 @@ Nothing else in the codebase needs to know which environment it's running in -- 
 
 ### Deploying
 
+`databricks bundle deploy` builds the wheel via `python -m build --wheel` (see the `artifacts` block in `databricks.yml`), so the `build` package must be installed first -- it's included in the `dev` extra:
+
 ```bash
+pip install -e ".[dev]"
 databricks bundle validate
 databricks bundle deploy -t dev
 databricks bundle run extract_devices_job -t dev
 ```
 
-`databricks bundle validate` has not been run against a real Databricks CLI yet -- unavailable in the environment this bundle was authored in. Expect to fix minor schema issues on the first real pass.
+Validated live against a real Databricks CLI and the `nationwide-irm-test-ohio` workspace on 2026-07-17 -- `bundle validate`/`deploy` both succeed cleanly aside from one known warning (`alert_on_last_attempt` misplaced in the task's `email_notifications` block -- deferred, doesn't block deploy). Triggering an actual run still needs the real secret scope names from Nationwide (see below).
 
 ### Known gaps in this skeleton
 
@@ -238,7 +241,7 @@ The `output/` directory is git-ignored. Each run produces a new timestamped set 
 ### Adding a new SCCM table
 
 1. Set the matching `DATABRICKS_TABLE_*` env var in `.env`
-2. Uncomment the corresponding `TableSpec` line in `TABLE_REGISTRY` in [`scripts/extract_devices.py`](scripts/extract_devices.py)
+2. Uncomment the corresponding `TableSpec` line in `TABLE_REGISTRY` in [`etl/extract_devices.py`](etl/extract_devices.py)
 
 No other code changes are needed. The new table is automatically pulled with an IN-clause filter and passed to the merge and feature-extraction stages.
 
@@ -271,7 +274,7 @@ db/
   queries.py         -- Catalog browsing, SQL execution, result helpers
   transform.py       -- Feature extraction (extract_features) and Drata format assembly (format_for_drata)
   drata_client.py    -- Drata Custom Device Connection API client
-scripts/
+etl/
   __init__.py
   test_connection.py -- Connectivity probe and single-table export
   extract_devices.py -- ETL: pull via registry, user-centric merge, transform, write, push

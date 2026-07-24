@@ -17,10 +17,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "build>=1.0",
 ]
 
 [project.scripts]
-extract-devices = "scripts.extract_devices:main"
+extract-devices = "etl.extract_devices:main"
 
 [tool.setuptools]
-packages = ["db", "scripts"]
+packages = ["db", "etl"]

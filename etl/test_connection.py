@@ -3,10 +3,10 @@
 Connectivity and data extraction test.
 
 Usage:
-    python scripts/test_connection.py
-    python scripts/test_connection.py --table catalog.schema.table_name
-    python scripts/test_connection.py --table catalog.schema.table_name --limit 500
-    python scripts/test_connection.py --table catalog.schema.table_name --output path/to/out.json
+    python etl/test_connection.py
+    python etl/test_connection.py --table catalog.schema.table_name
+    python etl/test_connection.py --table catalog.schema.table_name --limit 500
+    python etl/test_connection.py --table catalog.schema.table_name --output path/to/out.json
 
 Phases:
     0-2  Auth and connectivity (always runs)
@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Allow running from repo root or from scripts/
+# Allow running from repo root or from etl/
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db.auth import get_client, get_config, load_env

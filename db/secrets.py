@@ -3,7 +3,7 @@ Credential resolution that works identically whether this code runs locally (.en
 inside a Databricks Job (Databricks secret scope).
 
 This is the one place that knows "where do credentials come from" -- every other module
-(db/auth.py, scripts/extract_devices.py) just calls get_secret() and gets the right value
+(db/auth.py, etl/extract_devices.py) just calls get_secret() and gets the right value
 back regardless of environment.
 """
 

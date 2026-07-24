@@ -82,7 +82,7 @@ resources:
           # Adjust once a real --full run's wall-clock time is measured.
           timeout_seconds: 14400
           # Safe because Drata upserts on externalId (see the duplicate-externalId quality
-          # gate in scripts/extract_devices.py) -- a retried run re-pushes the same data,
+          # gate in etl/extract_devices.py) -- a retried run re-pushes the same data,
           # it does not create duplicates.
           max_retries: 1
           email_notifications:
