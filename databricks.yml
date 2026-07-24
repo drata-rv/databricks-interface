@@ -107,6 +107,10 @@ resources:
             client: "1"
             dependencies:
               - ./dist/*.whl
+              # Vendored third-party dependencies (see vendor/README.md for how these were
+              # built and how to refresh them) -- avoids needing PyPI reachability from
+              # serverless compute, which is not open by default in this environment.
+              - ./vendor/*.whl
 
 targets:
   dev:
