@@ -88,6 +88,10 @@ resources:
           email_notifications:
             on_failure:
               - CHANGE_ME_ops_distribution_list@example.com # PLACEHOLDER -- confirm on-call/ops list
+          # Only alert on the final retry attempt, not every one -- avoids spamming the
+          # ops list once per attempt when max_retries kicks in.
+          webhook_notifications: {}
+          notification_settings:
             alert_on_last_attempt: true
           python_wheel_task:
             package_name: databricks-interface
@@ -102,7 +106,7 @@ resources:
           spec:
             client: "1"
             dependencies:
-              - .
+              - ./dist/*.whl
 
 targets:
   dev:
