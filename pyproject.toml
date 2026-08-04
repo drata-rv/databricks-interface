@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "databricks-interface"
-version = "0.1.3"
+version = "0.1.4"
 requires-python = ">=3.8"
 # Kept in sync with requirements.txt (the local/CI install path) -- update both together.
 dependencies = [
