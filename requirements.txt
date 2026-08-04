@@ -1,5 +1,12 @@
 # Kept in sync with pyproject.toml's [project.dependencies] -- update both together.
-databricks-sdk>=0.27,<1.0
+#
+# databricks-sdk and google-auth are HARD PINNED, not ranged -- see vendor/README.md
+# ("Pinned versions" section) for why: 0.73.0+ of databricks-sdk excludes the exact
+# protobuf version Databricks serverless pre-installs, and google-auth 2.48+ hard-requires
+# `cryptography` (a compiled, arch-specific wheel) where 2.47.0 doesn't. Do not loosen
+# these back to a range without re-reading that section.
+databricks-sdk==0.72.0
+google-auth==2.47.0
 python-dotenv>=1.0
 requests>=2.31,<3.0
 openpyxl>=3.1,<4.0

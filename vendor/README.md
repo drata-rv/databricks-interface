@@ -78,13 +78,40 @@ version of a core Python package", `ModuleNotFoundError: dbruntime.overlay_magic
 run 2026-07-24. This is the *only* wheel excluded on purpose, and only because that specific
 failure was directly observed -- do not add another package to this list on assumption alone.
 
-**Correction (2026-08-04):** `cryptography`, `cffi`, and `pycparser` were previously excluded
-too, on the unverified assumption that Databricks' base env already ships a satisfying
-`cryptography`. That assumption was wrong (or at least unproven) and caused the real deploy
-failure "Library installation failed... Unable to find or download the required package or
-its dependencies" -- pip had no PyPI reachability and no local wheel to satisfy
-`google-auth`'s **unconditional** `cryptography>=38.0.3` dependency (it is not behind any
-`extra ==` marker; check a package's actual `Requires-Dist` in its wheel METADATA before ever
-excluding it again, don't assume from the dependency name what pulled it in). All three are
-vendored now. `vendor/` should contain the *full* dependency closure of `requirements.txt`
-minus only `protobuf`.
+## Pinned versions: databricks-sdk==0.72.0, google-auth==2.47.0 (2026-08-04)
+
+**What actually broke, confirmed from a real failed run's diagnostic:** Databricks serverless
+compute pre-installs `protobuf==5.29.4` and `google-auth==2.47.0`. `requirements.txt` had
+`databricks-sdk>=0.27,<1.0` -- an unpinned range -- so every vendor regen grabbed whatever was
+newest on PyPI at the time (`0.123.0`). That version's `protobuf` requirement is
+`!=5.29.4,...,>=4.25.8,<7.0` -- it **explicitly excludes** the exact version already installed.
+Since `protobuf` itself is deliberately excluded from `vendor/` (see above), pip had no local
+wheel and no PyPI reachability to satisfy the now-broken constraint: "Library installation
+failed... unsatisfiable dependency constraints."
+
+Separately, that same `databricks-sdk` version's `google-auth~=2.0` pulled the newest matching
+release (`2.56.2`), which added an **unconditional** `cryptography>=38.0.3` dependency (no
+`extra ==` gate) that the pre-installed `2.47.0` never had. That forced vendoring
+`cryptography`/`cffi`/`pycparser` -- all compiled, platform/arch-specific wheels -- which is
+almost certainly what then produced the *next* failure ("platform tag mismatch or invalid
+wheel"): guessing manylinux x86_64 tags blind, with no way to confirm the real compute
+architecture from here.
+
+**The actual fix: stop letting the vendor regen silently pick "whatever's newest."** Checked
+`databricks-sdk`'s dependency metadata across its full release history (via each version's
+wheel `METADATA`, not by guessing) and found `0.73.0` is exactly where the harsh protobuf
+exclusion list was introduced -- `0.72.0` and earlier just require `protobuf<7.0,>=4.21.0`,
+which `5.29.4` satisfies cleanly. And `google-auth==2.47.0` (the exact pre-installed version)
+requires only `pyasn1-modules` and `rsa` at its core -- every `cryptography` line in its
+metadata is gated behind an `extra ==` marker. Pure-Python signing, zero compiled wheels.
+
+`requirements.txt`/`pyproject.toml` now hard-pin `databricks-sdk==0.72.0` and
+`google-auth==2.47.0` instead of ranges. `vendor/` is the full dependency closure of that
+pinned set minus only `protobuf` -- 13 wheels, every one of them `py3-none-any` /
+`py2.py3-none-any`. No `cryptography`, no `cffi`, no `pycparser`, no ABI-specific build
+anywhere in this directory. **Do not loosen these two pins back to a range** -- a future
+regen would silently drift onto a newer `databricks-sdk`/`google-auth` and reintroduce the
+exact protobuf/cryptography conflict this section just walked through. If a newer SDK version
+is ever needed, first check its `Requires-Dist: protobuf` in the wheel `METADATA` against
+whatever protobuf version is *actually* pre-installed at the time (print it from a real task
+run -- don't assume it's still `5.29.4`).

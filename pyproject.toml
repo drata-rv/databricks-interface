@@ -4,11 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "databricks-interface"
-version = "0.1.5"
+version = "0.1.6"
 requires-python = ">=3.8"
 # Kept in sync with requirements.txt (the local/CI install path) -- update both together.
+# databricks-sdk/google-auth are hard pinned -- see requirements.txt and vendor/README.md.
 dependencies = [
-    "databricks-sdk>=0.27,<1.0",
+    "databricks-sdk==0.72.0",
+    "google-auth==2.47.0",
     "python-dotenv>=1.0",
     "requests>=2.31,<3.0",
     "openpyxl>=3.1,<4.0",
