@@ -202,6 +202,8 @@ Validated live against a real Databricks CLI and the `nationwide-irm-test-ohio` 
 - Task-level environment variables (table paths, `DATABRICKS_SECRET_SCOPE_PROD`/`_TEST`, etc.) are not yet wired into the running process -- `databricks.yml` declares them but the job spec doesn't consume them. The correct mechanism for a `python_wheel_task` on serverless compute (an `environments.spec` env key, or a different passthrough) still needs to be confirmed against a real CLI.
 - Only `--limit` is currently forwarded to the wheel task's entry point (see `python_wheel_task.parameters` in `databricks.yml`). `--full`, `--sandbox`, `--test-mode`, and `--dry-run` are declared as job parameters (table below) but not yet passed through -- these are `store_true` flags with no value, so forwarding them needs either an argparse change (accept an explicit `true`/`false`) or a different plumbing approach. Not yet decided.
 
+**Serverless environment caching (resolved 2026-07-27):** Databricks caches the built environment by dependency spec and will silently keep running an old wheel if the version string is unchanged between deploys -- this caused an identical library-install failure to persist across multiple substantive code changes before it was traced back to `pyproject.toml`'s version never being bumped. `databricks.yml`'s artifact block now sets `dynamic_version: true` (requires Databricks CLI >=0.245.0) so every build gets a unique version automatically -- no manual bump needed going forward.
+
 ### CLI flags -> job parameters
 
 | CLI flag | Job parameter | Wired today? |

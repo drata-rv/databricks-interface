@@ -54,6 +54,12 @@ artifacts:
     type: whl
     build: python -m build --wheel
     path: .
+    # Serverless compute caches the built environment by dependency spec and will silently
+    # keep running an OLD wheel if the version string doesn't change between deploys -- this
+    # is documented Databricks behavior, not a bug, and explains why identical library-install
+    # failures persisted across multiple substantive code changes on 2026-07-24/27. Requires
+    # Databricks CLI >=0.245.0 (confirmed 0.296.0 in use).
+    dynamic_version: true
 
 resources:
   jobs:
