@@ -100,12 +100,13 @@ The `.env.example` file is pre-filled with all known workspace URLs, warehouse I
 | `DRATA_CONNECTION_ID` | No* | UUID of the Custom Device Connection in Drata |
 | `DATABRICKS_TABLE_BITLOCKER` | No | Path to t_sccm_gs_encryptable_volume -- enables `encryptionEnabled` (`protection_status0`) |
 | `DATABRICKS_TABLE_COMPUTER_SYSTEM` | No | Path to t_sccm_gs_computer_system -- enables a real hardware `model` (`model0`); falls back to CPU type if absent |
-| `DATABRICKS_TABLE_SCREENSAVER` | No | Path to screensaver settings table -- enables `screenLockEnabled` |
-| `DATABRICKS_TABLE_SERVICES` | No | Path to Windows services table -- enables `firewallEnabled`, `windowsServices` |
-| `DATABRICKS_TABLE_NETWORK_ADAPTER` | No | Path to network adapter config table -- enables `macAddress` |
+| `DATABRICKS_TABLE_SCREENSAVER` | No | Path to screensaver settings table. **Not yet wired** -- the matching `TableSpec` line in `TABLE_REGISTRY` is still commented out, so setting this currently has no effect on `screenLockEnabled` |
+| `DATABRICKS_TABLE_SERVICES` | No | Path to Windows services table. **Not yet wired** -- the matching `TableSpec` line in `TABLE_REGISTRY` is still commented out, so setting this currently has no effect on `firewallEnabled`/`windowsServices` |
+| `DATABRICKS_TABLE_NETWORK_ADAPTER` | No | Path to network adapter config table. **Not yet wired** -- the matching `TableSpec` line in `TABLE_REGISTRY` is still commented out, so setting this currently has no effect on `macAddress` |
 | `DATABRICKS_CLIENT_ID_PROD` / `_TEST` | No | Service-principal application ID; takes priority over the matching `DATABRICKS_TOKEN_*` when both `CLIENT_ID` and `CLIENT_SECRET` are set |
 | `DATABRICKS_CLIENT_SECRET_PROD` / `_TEST` | No | Service-principal OAuth secret (paired with `CLIENT_ID` above) |
 | `DATABRICKS_SECRET_SCOPE_PROD` / `_TEST` | No | Databricks secret scope name per workspace; only consulted inside a Databricks Job (see `db/secrets.py`) |
+| `DATABRICKS_SECRET_SCOPE` | No | Shared secret scope fallback, only consulted if the `_PROD`/`_TEST` variants above are unset |
 
 *`DRATA_API_KEY` and `DRATA_CONNECTION_ID` are required for the Drata push step. If either is unset, the pipeline writes JSON output but skips the push (equivalent to `--dry-run`).
 
@@ -212,24 +213,25 @@ prints a version string. If it also fails with the same kernel-restart error, th
 workspace/platform-side and needs Databricks support or a workspace admin, not more changes
 to this repo. If it succeeds, the issue is confirmed to be in our own wheel or dependencies.
 
-Validated live against a real Databricks CLI and the `nationwide-irm-test-ohio` workspace on 2026-07-17 -- `bundle validate`/`deploy` both succeed cleanly aside from one known warning (`alert_on_last_attempt` misplaced in the task's `email_notifications` block -- deferred, doesn't block deploy). Triggering an actual run still needs the real secret scope names from Nationwide (see below).
+Validated live against a real Databricks CLI and the `nationwide-irm-test-ohio` workspace starting 2026-07-17 -- `bundle validate`/`deploy` succeed cleanly. Triggering an actual run of `extract_devices_job` still needs the real secret scope names from Nationwide (see below); use `smoke_test_job` in the meantime to confirm the workspace's serverless compute itself is healthy (see "Smoke-testing the workspace itself" above).
 
 ### Known gaps in this skeleton
 
 - Task-level environment variables (table paths, `DATABRICKS_SECRET_SCOPE_PROD`/`_TEST`, etc.) are not yet wired into the running process -- `databricks.yml` declares them but the job spec doesn't consume them. The correct mechanism for a `python_wheel_task` on serverless compute (an `environments.spec` env key, or a different passthrough) still needs to be confirmed against a real CLI.
-- Only `--limit` is currently forwarded to the wheel task's entry point (see `python_wheel_task.parameters` in `databricks.yml`). `--full`, `--sandbox`, `--test-mode`, and `--dry-run` are declared as job parameters (table below) but not yet passed through -- these are `store_true` flags with no value, so forwarding them needs either an argparse change (accept an explicit `true`/`false`) or a different plumbing approach. Not yet decided.
+
+**Resolved 2026-08-04:** `--full`/`--sandbox`/`--test-mode`/`--dry-run` are now all forwarded to the wheel task's entry point. These flags changed from `store_true` to accept an optional explicit value (`nargs='?'`) so a job parameter -- passed as two separate tokens, e.g. `"--test-mode"` `"{{job.parameters.test_mode}}"` -- can supply `true`/`false` explicitly; bare `--test-mode` (no value) still works identically for local CLI usage.
 
 **Serverless environment caching (resolved 2026-07-27):** Databricks caches the built environment by dependency spec and will silently keep running an old wheel if the version string is unchanged between deploys -- this caused an identical library-install failure to persist across multiple substantive code changes before it was traced back to `pyproject.toml`'s version never being bumped. `databricks.yml`'s artifact block now sets `dynamic_version: true` (requires Databricks CLI >=0.245.0) so every build gets a unique version automatically -- no manual bump needed going forward.
 
 ### CLI flags -> job parameters
 
-| CLI flag | Job parameter | Wired today? |
-|---|---|---|
-| `--limit` | `limit` | Yes |
-| `--full` | `full` | No -- see Known gaps above |
-| `--sandbox` | `sandbox` | No -- see Known gaps above |
-| `--test-mode` | `test_mode` | No -- see Known gaps above |
-| `--dry-run` | `dry_run` | No -- see Known gaps above |
+| CLI flag | Job parameter |
+|---|---|
+| `--limit` | `limit` |
+| `--full` | `full` |
+| `--sandbox` | `sandbox` |
+| `--test-mode` | `test_mode` |
+| `--dry-run` | `dry_run` |
 
 Table paths, warehouse IDs, and credentials are **not** job parameters by design -- they stay env/secret-driven, so there's one configuration surface instead of two, and credentials never flow through job parameters or notebook widgets.
 
@@ -239,7 +241,7 @@ None of the following block writing or merging code -- they block only the `prod
 
 - Tables will be available in `nationwide-irm-prod-ohio` once prod switches over -- confirmed, no further action needed.
 - Egress to `public-api.drata.com` is clear -- confirmed, no further action needed.
-- **Still open**: the actual secret scope names for the Test and Production scopes Terry confirmed were created, and a named owner/application ID for the OAuth service-principal identity. `databricks.yml` marks the corresponding placeholders with a `CHANGE_ME_` prefix.
+- **Still open**: the actual secret scope names for the Test and Production scopes Terry confirmed were created, a named owner/application ID for the OAuth service-principal identity, and the reachable/authorized `prod` workspace host itself. `databricks.yml` marks all corresponding placeholders with a `CHANGE_ME_` prefix.
 
 ---
 

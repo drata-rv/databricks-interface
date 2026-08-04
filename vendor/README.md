@@ -8,6 +8,12 @@ in this environment.
 
 Committed to git deliberately (unlike `dist/`, which is a regenerated build artifact).
 
+**Python version note:** `pyproject.toml`'s `requires-python = ">=3.8"` governs local
+development and the base package only. These vendored wheels are hard-pinned to Python 3.10
+(`cp310` ABI) to match the Databricks runtime above -- the Databricks-native job path does
+not work on any other Python version regardless of what `requires-python` states, since these
+exact wheel files (not a fresh PyPI resolution) are what gets installed on serverless compute.
+
 ## Refreshing
 
 Whenever `requirements.txt`/`pyproject.toml` dependencies change, regenerate this directory:
