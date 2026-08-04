@@ -426,8 +426,14 @@ def format_for_drata(features: Dict[str, Any]) -> Dict[str, Any]:
         ),
         'model': features['model'],
         'macAddress': features['mac_address'],
-        'platformName': _platform_name(device.get('Operating_System_Name_and0')),
-        'platformVersion': device.get('Build01') or device.get('BuildExt') or 'Unknown',
+        'platformName': _platform_name(
+            device.get('Operating_System_Name_and0') or device.get('operating_system_name_and0')
+        ),
+        'platformVersion': (
+            device.get('Build01') or device.get('build01')
+            or device.get('BuildExt') or device.get('build_ext')
+            or 'Unknown'
+        ),
         'antivirusEnabled': features['av_enabled'],
         'antivirusExplanation': {'antivirusApps': features['av_apps']},
         'appList': features['app_list'],

@@ -56,3 +56,60 @@ def test_extract_model_falls_back_when_model0_empty():
 
 def test_extract_model_none_when_no_source_available():
     assert transform._extract_model({}, None) is None
+
+
+def _minimal_features(device):
+    """Build a complete-enough features dict for format_for_drata(), varying only device."""
+    return {
+        'resource_id': 1,
+        'device': device,
+        'user': {},
+        'model': None,
+        'mac_address': None,
+        'av_enabled': False,
+        'av_apps': [],
+        'pm_enabled': False,
+        'pm_apps': [],
+        'au_enabled': False,
+        'au_explanation': '',
+        'app_list': [],
+        'fw_enabled': None,
+        'fw_explanation': None,
+        'enc_enabled': None,
+        'enc_explanation': None,
+        'sl_enabled': None,
+        'sl_explanation': None,
+        'sl_time': None,
+        'windows_services': [],
+    }
+
+
+def test_platform_name_and_version_prefer_pascal_case():
+    result = transform.format_for_drata(_minimal_features({
+        'Operating_System_Name_and0': 'Microsoft Windows 11 Enterprise',
+        'Build01': '22631',
+    }))
+    assert result['platformName'] == 'WINDOWS'
+    assert result['platformVersion'] == '22631'
+
+
+def test_platform_name_and_version_fall_back_to_snake_case():
+    """Real Databricks-sourced device rows use snake_case (t_sccm_r_system), never PascalCase."""
+    result = transform.format_for_drata(_minimal_features({
+        'operating_system_name_and0': 'Microsoft Windows 11 Enterprise',
+        'build01': '22631',
+        'build_ext': '3593',
+    }))
+    assert result['platformName'] == 'WINDOWS'
+    assert result['platformVersion'] == '22631'
+
+
+def test_platform_version_falls_back_to_build_ext_when_build01_absent():
+    result = transform.format_for_drata(_minimal_features({'build_ext': '3593'}))
+    assert result['platformVersion'] == '3593'
+
+
+def test_platform_name_and_version_unknown_when_no_source_available():
+    result = transform.format_for_drata(_minimal_features({}))
+    assert result['platformName'] == 'WINDOWS'  # _platform_name's own documented fallback
+    assert result['platformVersion'] == 'Unknown'
