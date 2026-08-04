@@ -195,6 +195,23 @@ databricks bundle deploy -t dev
 databricks bundle run extract_devices_job -t dev
 ```
 
+### Smoke-testing the workspace itself
+
+If `extract_devices_job` fails at Python kernel startup ("Failed to restart Python", a
+`dbruntime`/`ModuleNotFoundError` traceback, or similar) and you need to know whether that's
+our code/dependencies or the workspace's serverless compute itself, run the zero-dependency
+isolation job first:
+
+```bash
+databricks bundle run smoke_test_job -t dev
+```
+
+`smoke_test_job` has no custom package, no vendored wheels, and no relationship to this
+project's dependency tree (see `smoke_test.py`) -- it just imports the standard library and
+prints a version string. If it also fails with the same kernel-restart error, the problem is
+workspace/platform-side and needs Databricks support or a workspace admin, not more changes
+to this repo. If it succeeds, the issue is confirmed to be in our own wheel or dependencies.
+
 Validated live against a real Databricks CLI and the `nationwide-irm-test-ohio` workspace on 2026-07-17 -- `bundle validate`/`deploy` both succeed cleanly aside from one known warning (`alert_on_last_attempt` misplaced in the task's `email_notifications` block -- deferred, doesn't block deploy). Triggering an actual run still needs the real secret scope names from Nationwide (see below).
 
 ### Known gaps in this skeleton
@@ -281,7 +298,9 @@ etl/
   test_connection.py -- Connectivity probe and single-table export
   extract_devices.py -- ETL: pull via registry, user-centric merge, transform, write, push
 tests/               -- pytest suite; mocks WorkspaceClient, no network access required
+vendor/              -- Pre-downloaded dependency wheels for Databricks serverless compute (git-committed; see vendor/README.md)
 output/              -- Extracted JSON files (git-ignored)
+smoke_test.py        -- Zero-dependency Databricks serverless platform-isolation test (see "Smoke-testing the workspace itself")
 .env.example         -- Credential and config template (pre-filled)
 pyproject.toml       -- Package definition + extract-devices console script entry point
 databricks.yml       -- Databricks Asset Bundle (native Job deployment)

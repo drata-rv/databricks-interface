@@ -118,6 +118,24 @@ resources:
               # serverless compute, which is not open by default in this environment.
               - ./vendor/*.whl
 
+    smoke_test_job:
+      name: smoke_test_job
+      # Zero-dependency platform-isolation test (added 2026-08-04): if this fails with the
+      # same "Failed to restart Python" / dbruntime kernel-restart error extract_devices_job
+      # has been hitting, that proves the failure is workspace/platform-side, not caused by
+      # anything in our own wheel/vendor/dependency tree. No custom package, no vendored
+      # wheels, no relationship to this project's code at all -- see smoke_test.py.
+      tasks:
+        - task_key: smoke_test
+          spark_python_task:
+            python_file: ./smoke_test.py
+          environment_key: smoke_test_env
+
+      environments:
+        - environment_key: smoke_test_env
+          spec:
+            client: "1"
+
 targets:
   dev:
     mode: development
