@@ -161,10 +161,17 @@ def _ids_filter(ids: List[int], column: str = "resource_id") -> str:
 
 
 def _names_filter(names: List[str], column: str = "Netbios_Name0") -> str:
-    """Build a SQL IN filter for string names with single-quote escaping."""
+    """Build a SQL IN filter for string names with backslash and single-quote escaping.
+
+    Backslash must be escaped first -- it's the escape metacharacter in Spark SQL string
+    literals, so a name ending in a single backslash would otherwise escape the literal's
+    closing quote and corrupt the rest of the generated IN-list.
+    """
     if not names:
         return "1=0"
-    escaped = ", ".join("'" + n.replace("'", "''") + "'" for n in names)
+    escaped = ", ".join(
+        "'" + n.replace("\\", "\\\\").replace("'", "''") + "'" for n in names
+    )
     return f"{column} IN ({escaped})"
 
 
@@ -308,7 +315,9 @@ def merge(
     for dev in devices:
         netbios = dev.get('Netbios_Name0') or dev.get('Name0')
         if netbios:
-            device_by_netbios[netbios] = dev
+            # Normalized (strip+lower) so a casing/whitespace difference between the xlsx
+            # users source and the SCCM devices table can't silently defeat this join.
+            device_by_netbios[netbios.strip().lower()] = dev
         uname = (dev.get('user_name0') or dev.get('User_Name0') or '').strip().lower()
         udomain = (dev.get('user_domain0') or dev.get('User_Domain0') or '').strip().lower()
         if uname:
@@ -400,8 +409,9 @@ def merge(
     output: List[Dict[str, Any]] = []
     for row in users:
         netbios = row.get('Netbios_Name0') or row.get('netbios_name0')
-        if netbios and netbios in device_by_netbios:
-            matched_devices = [device_by_netbios[netbios]]
+        netbios_key = netbios.strip().lower() if netbios else None
+        if netbios_key and netbios_key in device_by_netbios:
+            matched_devices = [device_by_netbios[netbios_key]]
         else:
             uname = (row.get('user_name0') or '').strip().lower()
             udomain = (row.get('windows_nt_domain0') or '').strip().lower()
@@ -553,10 +563,13 @@ def parse_args() -> argparse.Namespace:
             "Records are scoped to the machine names returned by the devices pull."
         ),
     )
+    # test-mode/sandbox/dry-run/full accept an optional explicit value (nargs='?') rather than
+    # plain store_true -- a Databricks job parameter is passed as "--test-mode" "{{...}}" (two
+    # separate tokens), which store_true can't represent since it takes no value at all. Bare
+    # `--test-mode` (no value, local CLI usage) still works via const='true'.
     parser.add_argument(
         "--test-mode",
-        action="store_true",
-        default=False,
+        nargs='?', const='true', default='false',
         help=(
             "Push real identities to Drata with all 5 monitoring fields forced to a passing "
             "state. Uses real personnelId/alias/externalId so records land on actual users. "
@@ -566,14 +579,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sandbox",
-        action="store_true",
-        default=False,
+        nargs='?', const='true', default='false',
         help="Replace @nationwide.com with @sandbox.nationwide.com in personnelId before pushing.",
     )
     parser.add_argument(
         "--dry-run",
-        action="store_true",
-        default=False,
+        nargs='?', const='true', default='false',
         help="Run the full pipeline but skip the Drata API push. Output files are still written.",
     )
     parser.add_argument(
@@ -584,14 +595,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--full",
-        action="store_true",
-        default=False,
+        nargs='?', const='true', default='false',
         help=(
             "Process all users -- bypasses --limit and runs the full dataset using the "
             "chunked pipeline. Intended for production sync of 25,000+ users."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    for flag in ('test_mode', 'sandbox', 'dry_run', 'full'):
+        setattr(args, flag, str(getattr(args, flag)).strip().lower() in ('true', '1', 'yes'))
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +637,15 @@ def main() -> None:
     default_raw, default_drata = default_output_paths(test_mode=args.test_mode)
     raw_path = Path(args.output_raw) if args.output_raw else default_raw
     drata_path = Path(args.output_drata) if args.output_drata else default_drata
-    rejected_path = drata_path.parent / drata_path.name.replace('_drata.json', '_rejected.json')
+    # Preserve the conventional _drata.json -> _rejected.json naming when present, but never
+    # let rejected_path collapse to the same path as drata_path for a --output-drata value
+    # that doesn't contain that exact substring -- that would silently clobber the real
+    # output file when the rejected-records write happens later.
+    if '_drata.json' in drata_path.name:
+        rejected_name = drata_path.name.replace('_drata.json', '_rejected.json')
+    else:
+        rejected_name = drata_path.stem + '_rejected' + drata_path.suffix
+    rejected_path = drata_path.parent / rejected_name
     _crash_state['raw_path'] = raw_path
     _crash_state['drata_path'] = drata_path
 
@@ -802,9 +823,18 @@ def main() -> None:
             continue
 
         resource_ids = [rid for rid in (get_resource_id(r) for r in devices) if rid is not None]
+        # Derived from the pulled devices themselves, not chunk_names -- chunk_names holds
+        # usernames (not Netbios names) in the default Databricks mode, so a table registered
+        # with filter_type='netbios_name' would otherwise compare Netbios_Name0 against
+        # username values and match nothing.
+        device_names = [
+            d.get('Netbios_Name0') or d.get('Name0') or d.get('netbios_name0') or d.get('name0')
+            for d in devices
+        ]
+        device_names = [n for n in device_names if n]
         filter_map = {
             'resource_id': _ids_filter(resource_ids),
-            'netbios_name': _names_filter(chunk_names),
+            'netbios_name': _names_filter(device_names),
         }
 
         # Step 3: pull secondary tables for this chunk

@@ -174,7 +174,7 @@ class DrataClient:
                     continue
                 resp.raise_for_status()
                 return resp.json().get('employmentStatus')
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            except requests.exceptions.RequestException as e:
                 last_err = e
                 if attempt < _MAX_RETRIES:
                     time.sleep(_RETRY_DELAYS[attempt - 1])

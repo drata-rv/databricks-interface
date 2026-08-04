@@ -50,7 +50,18 @@ def get_client_for(host: str, token: str) -> WorkspaceClient:
 
     Use this when targeting a workspace other than the default (e.g. a test
     workspace with a different URL and token).
+
+    Raises if host or token is missing rather than constructing WorkspaceClient(host=None,
+    token=None) -- the SDK would silently fall through to its own ambient credential chain
+    (env vars, ~/.databrickscfg, cloud-native auth) in that case, meaning a caller who thinks
+    they're targeting a specific workspace could silently authenticate against a different
+    one with no error.
     """
+    if not host or not token:
+        raise ValueError(
+            f"get_client_for requires both host and token; got host={host!r}, "
+            f"token={'<set>' if token else token!r}"
+        )
     load_env()
     return WorkspaceClient(host=host, token=token)
 

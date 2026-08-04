@@ -31,6 +31,16 @@ def test_get_client_for_passes_through_host_and_token():
         MockWC.assert_called_once_with(host="https://x.example.com", token="tok-123")
 
 
+@pytest.mark.parametrize("host,token", [(None, "tok-123"), ("https://x.example.com", None), (None, None), ("", "")])
+def test_get_client_for_raises_on_missing_host_or_token(host, token):
+    """Must fail loudly rather than constructing WorkspaceClient(host=None, token=None),
+    which would silently fall through to the SDK's own ambient credential chain."""
+    with mock.patch("db.auth.WorkspaceClient") as MockWC:
+        with pytest.raises(ValueError):
+            auth.get_client_for(host, token)
+        MockWC.assert_not_called()
+
+
 def test_load_env_missing_dotenv_is_a_noop():
     with mock.patch.dict(sys.modules, {"dotenv": None}):
         auth.load_env()  # must not raise

@@ -22,6 +22,7 @@ Table path resolution order:
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,9 +80,31 @@ def default_output_path(table: str) -> Path:
     return Path("output") / f"{table_slug}_{timestamp}.json"
 
 
+# --table/DATABRICKS_TABLE is spliced directly into a SQL statement (step 7) -- restrict it
+# to the standard Unity Catalog identifier shape before it ever reaches run_sql().
+_TABLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+
+def _safe_int_env(name: str, default: int) -> int:
+    """Read an int env var without crashing before any output is printed.
+
+    A raw int(os.getenv(...)) as an argparse default evaluates at parse_args() call time --
+    a non-numeric value (typo, stray unit suffix) would raise ValueError before section 0
+    ever prints, killing the whole probe with a bare traceback and zero diagnostic output.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"  [WARN] {name}={raw!r} is not a valid integer -- using default {default}.")
+        return default
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -96,7 +119,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=int(os.getenv("DATABRICKS_LIMIT", "1000")),
+        default=_safe_int_env("DATABRICKS_LIMIT", 1000),
         help="Max rows to pull (default: 1000).",
     )
     parser.add_argument(
@@ -126,11 +149,10 @@ def main() -> None:
         cfg = get_config()
         print(f"  Host    : {cfg.host}")
         print(f"  Auth    : {cfg.auth_type}")
+        client = get_client()
     except Exception as e:
         fail("Could not resolve config", e)
         sys.exit(1)
-
-    client = get_client()
 
     # ------------------------------------------------------------------ #
     # 1. Workspace connectivity                                            #
@@ -231,6 +253,11 @@ def main() -> None:
         skip("set DATABRICKS_WAREHOUSE_ID in .env to enable")
     elif not table:
         skip("provide --table CATALOG.SCHEMA.TABLE or set DATABRICKS_TABLE in .env")
+    elif not _TABLE_IDENTIFIER_RE.match(table):
+        fail("Table pull", ValueError(
+            f"{table!r} doesn't look like a catalog.schema.table identifier -- refusing to "
+            "interpolate it into a SQL statement"
+        ))
     else:
         print(f"  Table   : {table}")
         print(f"  Limit   : {limit}")
