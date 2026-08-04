@@ -68,14 +68,23 @@ If Databricks moves the job to a different environment with a different Python v
 via a deployment error, or printing `sys.version` from a task, as `smoke_test.py` does) rather
 than trusting the public `client`/`environment_version` documentation, which was wrong here.
 
-## Deliberately excluded: protobuf, cryptography, cffi, pycparser
+## Deliberately excluded: protobuf only
 
-After the regeneration command above, delete these four from the output before committing.
-Databricks' own serverless kernel bootstrap (`dbruntime`) depends on grpc/protobuf internally,
-and vendoring a newer protobuf than what's already installed overwrites it -- this broke the
-Python kernel outright ("Failed to restart Python... may be due to updating the version of a
-core Python package", `ModuleNotFoundError: dbruntime.overlay_magic`) on a real run 2026-07-24.
-`cryptography`/`cffi`/`pycparser` are only pulled in transitively via `google-auth`'s
-`cryptography` requirement -- with protobuf excluded, letting the environment's own
-already-installed versions satisfy `databricks-sdk`'s and `google-auth`'s version constraints
-avoids the conflict without needing to know the exact "safe" version to pin.
+After the regeneration command above, delete `protobuf-*.whl` from the output before
+committing. Databricks' own serverless kernel bootstrap (`dbruntime`) depends on grpc/protobuf
+internally, and vendoring a newer protobuf than what's already installed overwrites it -- this
+broke the Python kernel outright ("Failed to restart Python... may be due to updating the
+version of a core Python package", `ModuleNotFoundError: dbruntime.overlay_magic`) on a real
+run 2026-07-24. This is the *only* wheel excluded on purpose, and only because that specific
+failure was directly observed -- do not add another package to this list on assumption alone.
+
+**Correction (2026-08-04):** `cryptography`, `cffi`, and `pycparser` were previously excluded
+too, on the unverified assumption that Databricks' base env already ships a satisfying
+`cryptography`. That assumption was wrong (or at least unproven) and caused the real deploy
+failure "Library installation failed... Unable to find or download the required package or
+its dependencies" -- pip had no PyPI reachability and no local wheel to satisfy
+`google-auth`'s **unconditional** `cryptography>=38.0.3` dependency (it is not behind any
+`extra ==` marker; check a package's actual `Requires-Dist` in its wheel METADATA before ever
+excluding it again, don't assume from the dependency name what pulled it in). All three are
+vendored now. `vendor/` should contain the *full* dependency closure of `requirements.txt`
+minus only `protobuf`.
