@@ -275,7 +275,8 @@ None of the following block writing or merging code -- they block only the `prod
 
 - Tables will be available in `nationwide-irm-prod-ohio` once prod switches over -- confirmed, no further action needed.
 - Egress to `public-api.drata.com` is clear -- confirmed, no further action needed.
-- **Still open**: the actual secret scope names for the Test and Production scopes Terry confirmed were created, a named owner/application ID for the OAuth service-principal identity (see "Adding the job's service principal" above for how to create and wire one up once named), and the reachable/authorized `prod` workspace host itself. `databricks.yml` marks all corresponding placeholders with a `CHANGE_ME_` prefix.
+- **Resolved 2026-08-04:** the test workspace's secret scope is `Drata ETL` -- confirmed by running `dbutils.secrets.listScopes()` directly in a `nationwide-irm-test-ohio` notebook and matching by name. `databricks.yml`'s `secret_scope_name_test` is set to it. **Not yet verified**: that the scope actually contains the keys this code expects (`databricks-client-id-test`/`databricks-client-secret-test` or `databricks-token-test`) -- run `dbutils.secrets.list(scope="Drata ETL")` before assuming a real run will authenticate successfully.
+- **Still open**: the actual secret scope name for the **Production** scope Terry confirmed was created (same discovery method should work -- run `dbutils.secrets.listScopes()` in a `nationwide-irm-prod-ohio` notebook, look for a similarly-named scope), a named owner/application ID for the OAuth service-principal identity (see "Adding the job's service principal" above for how to create and wire one up once named), and the reachable/authorized `prod` workspace host itself. `databricks.yml` marks all corresponding placeholders with a `CHANGE_ME_` prefix.
 
 ---
 

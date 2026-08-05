@@ -50,10 +50,13 @@ variables:
     default: "CHANGE_ME_secret_scope_prod"
   secret_scope_name_test:
     description: >
-      PLACEHOLDER -- same as secret_scope_name_prod above, for the test workspace's
-      databricks-client-id-test / databricks-client-secret-test (or databricks-token-test).
-      Do not deploy until this is set to the real scope name.
-    default: "CHANGE_ME_secret_scope_test"
+      Confirmed 2026-08-04 via dbutils.secrets.listScopes() run directly against the test
+      workspace (nationwide-irm-test-ohio) -- "Drata ETL" is the scope, named after this
+      integration. Holds databricks-client-id-test / databricks-client-secret-test (or
+      databricks-token-test as a PAT fallback). Contents not yet verified -- confirm the
+      expected keys actually exist (dbutils.secrets.list(scope="Drata ETL")) before relying
+      on this for a real run; the scope existing doesn't guarantee it's populated.
+    default: "Drata ETL"
   # Table paths below are NOT placeholders -- real values from .env.example, confirmed
   # against actual SCCM tables 2026-07-15 ("SCCM Test Tables - Updated 7-15.xlsx"). They were
   # already known; the only bug was that databricks.yml never passed them to the running job.
@@ -247,7 +250,7 @@ targets:
       host: https://nationwide-irm-test-ohio.cloud.databricks.com
     variables:
       secret_scope_name_prod: "CHANGE_ME_secret_scope_prod"
-      secret_scope_name_test: "CHANGE_ME_secret_scope_test"
+      secret_scope_name_test: "Drata ETL"
 
   prod:
     mode: production
