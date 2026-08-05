@@ -245,6 +245,10 @@ Fix: `etl/extract_devices.py` now takes a repeatable `--env KEY=VALUE` flag, app
 
 **Open:** output files (`output/devices_*_raw.json`, `_drata.json`, `_rejected.json`) are written to a plain local path (`etl/extract_devices.py::write_json()`), which works fine on serverless (writable local disk) but nothing persists or retrieves them afterward -- no Unity Catalog Volume, no DBFS, no upload step. The Drata push itself doesn't depend on these files (it reads the in-memory payload), so this isn't a crash, just silent loss of the audit-trail JSON once the job's container recycles. Needs a Volume path decision before `--full` runs matter for audit purposes.
 
+**Resolved 2026-08-04 -- prod-free end-to-end test run:** the devices table was hardcoded to the prod workspace connection (`prod_client`/`args.warehouse_prod`) regardless of what `--devices`/`DATABRICKS_TABLE_DEVICES` pointed at -- so even pointing `devices_table` at a test-catalog table still needed prod credentials just to authenticate the connection, which isn't the point of a test-only validation run. `etl/extract_devices.py` now takes `--devices-client {prod,test}` (default `prod`, matching the real production source unchanged) and only constructs `prod_client` when actually selected -- `--devices-client test` needs zero prod credentials. `databricks.yml`'s `dev` target sets `devices_client: "test"` and `devices_table` to `si_test_catalog.nw_harmonized_sensitive.t_sccm_v_r_system_temp` for exactly this: a first full pipeline run against test data only, to confirm records land in Drata correctly, before prod credentials exist at all.
+
+**Resolved 2026-08-04 -- Drata credentials had no scope to resolve from:** `db/secrets.py::get_secret()` calls for `drata-api-key`/`drata-connection-id` (`etl/extract_devices.py`) pass no explicit `scope`, so on Databricks they fall back to the generic (non-per-workspace) `DATABRICKS_SECRET_SCOPE` env var -- which nothing wired, since the fix above only covered the prod/test-suffixed ones. Now wired via `secret_scope_default` (defaults to the same `"Drata ETL"` scope). Drata credentials have since been added to that scope directly.
+
 ### CLI flags -> job parameters
 
 | CLI flag | Job parameter | Source |
@@ -254,8 +258,10 @@ Fix: `etl/extract_devices.py` now takes a repeatable `--env KEY=VALUE` flag, app
 | `--sandbox` | `sandbox` | literal default |
 | `--test-mode` | `test_mode` | literal default |
 | `--dry-run` | `dry_run` | literal default |
+| `--devices-client` | `devices_client` | `${var.devices_client}` |
 | `--env DATABRICKS_SECRET_SCOPE_PROD=...` | `secret_scope_prod` | `${var.secret_scope_name_prod}` |
 | `--env DATABRICKS_SECRET_SCOPE_TEST=...` | `secret_scope_test` | `${var.secret_scope_name_test}` |
+| `--env DATABRICKS_SECRET_SCOPE=...` | `secret_scope_default` | `${var.secret_scope_default}` |
 | `--env DATABRICKS_WAREHOUSE_ID=...` | `warehouse_prod` | `${var.warehouse_id_prod}` |
 | `--env DATABRICKS_WAREHOUSE_ID_TEST=...` | `warehouse_test` | `${var.warehouse_id_test}` |
 | `--env DATABRICKS_TABLE_DEVICES=...` | `devices_table` | `${var.devices_table}` |
@@ -267,7 +273,7 @@ Fix: `etl/extract_devices.py` now takes a repeatable `--env KEY=VALUE` flag, app
 | `--env DATABRICKS_TABLE_BITLOCKER=...` | `table_bitlocker` | `${var.table_bitlocker}` |
 | `--env DATABRICKS_TABLE_COMPUTER_SYSTEM=...` | `table_computer_system` | `${var.table_computer_system}` |
 
-Credentials (host/token/client_id/client_secret) are **not** job parameters, and never will be -- they stay resolved from the Databricks secret scope by `db/secrets.py` at runtime. Only the scope's *name* is a job parameter; its *contents* never flow through job parameters or notebook widgets.
+Credentials (host/token/client_id/client_secret/Drata API key) are **not** job parameters, and never will be -- they stay resolved from a Databricks secret scope by `db/secrets.py` at runtime. Only scope *names* are job parameters; scope *contents* never flow through job parameters or notebook widgets.
 
 ### Prerequisites before deploying to `prod`
 

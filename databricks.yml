@@ -57,6 +57,22 @@ variables:
       expected keys actually exist (dbutils.secrets.list(scope="Drata ETL")) before relying
       on this for a real run; the scope existing doesn't guarantee it's populated.
     default: "Drata ETL"
+  secret_scope_default:
+    description: >
+      Used for db/secrets.py::get_secret() calls that pass no explicit scope -- currently
+      only drata-api-key/drata-connection-id (etl/extract_devices.py). These aren't
+      per-workspace, so they don't fit secret_scope_name_prod/_test's split. Defaulted to
+      the same "Drata ETL" scope on the (unverified) assumption it holds the Drata keys too,
+      since it's the one scope for this whole integration -- confirm with
+      dbutils.secrets.list(scope="Drata ETL") before relying on this for a real push.
+    default: "Drata ETL"
+  devices_client:
+    description: >
+      Which workspace connection extract-devices.py uses for the devices table -- "prod"
+      (real production data, default) or "test" (a devices-equivalent table in the test
+      workspace's catalog, for an end-to-end test run needing zero prod credentials).
+      Overridden to "test" in the dev target below.
+    default: "prod"
   # Table paths below are NOT placeholders -- real values from .env.example, confirmed
   # against actual SCCM tables 2026-07-15 ("SCCM Test Tables - Updated 7-15.xlsx"). They were
   # already known; the only bug was that databricks.yml never passed them to the running job.
@@ -129,6 +145,10 @@ resources:
           default: "${var.secret_scope_name_prod}"
         - name: secret_scope_test
           default: "${var.secret_scope_name_test}"
+        - name: secret_scope_default
+          default: "${var.secret_scope_default}"
+        - name: devices_client
+          default: "${var.devices_client}"
         - name: warehouse_prod
           default: "${var.warehouse_id_prod}"
         - name: warehouse_test
@@ -181,6 +201,10 @@ resources:
               - "DATABRICKS_SECRET_SCOPE_PROD={{job.parameters.secret_scope_prod}}"
               - "--env"
               - "DATABRICKS_SECRET_SCOPE_TEST={{job.parameters.secret_scope_test}}"
+              - "--env"
+              - "DATABRICKS_SECRET_SCOPE={{job.parameters.secret_scope_default}}"
+              - "--devices-client"
+              - "{{job.parameters.devices_client}}"
               - "--env"
               - "DATABRICKS_WAREHOUSE_ID={{job.parameters.warehouse_prod}}"
               - "--env"
@@ -251,6 +275,13 @@ targets:
     variables:
       secret_scope_name_prod: "CHANGE_ME_secret_scope_prod"
       secret_scope_name_test: "Drata ETL"
+      # First real end-to-end validation: test data only, zero prod dependency, so this run
+      # can prove the pipeline pulls/transforms/pushes to Drata correctly before prod
+      # credentials exist at all. Switch devices_client back to "prod" (and drop this
+      # devices_table override, falling back to the top-level default) once that's confirmed
+      # and it's time to test against the real device inventory.
+      devices_client: "test"
+      devices_table: "si_test_catalog.nw_harmonized_sensitive.t_sccm_v_r_system_temp"
 
   prod:
     mode: production

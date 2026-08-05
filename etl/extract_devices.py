@@ -534,7 +534,18 @@ def parse_args() -> argparse.Namespace:
         "--devices",
         metavar="CATALOG.SCHEMA.TABLE",
         default=os.getenv("DATABRICKS_TABLE_DEVICES", ""),
-        help="Fully qualified path to the main device table (prod workspace). Uses DATABRICKS_TABLE_DEVICES.",
+        help="Fully qualified path to the main device table. Uses DATABRICKS_TABLE_DEVICES.",
+    )
+    parser.add_argument(
+        "--devices-client",
+        choices=["prod", "test"],
+        default=os.getenv("DATABRICKS_DEVICES_CLIENT", "prod"),
+        help=(
+            "Which workspace connection to use for the devices table (default: prod, matching "
+            "the real production data source). Set to 'test' for an end-to-end test run against "
+            "a devices-equivalent table in the test workspace's catalog, so a first validation "
+            "run needs no prod credentials at all. Uses DATABRICKS_DEVICES_CLIENT."
+        ),
     )
     parser.add_argument(
         "--warehouse-prod",
@@ -663,11 +674,15 @@ def main() -> None:
     # running inside a Databricks Job (where args.host_prod's argparse default would be empty
     # even though the real value is available). get_client_for_env()/WorkspaceClient() raise
     # their own clear error if host/token are genuinely unset in either environment.
-    missing = [name for name, val in [
+    required_values = [
         ("--devices (or DATABRICKS_TABLE_DEVICES)", args.devices),
-        ("--warehouse-prod (or DATABRICKS_WAREHOUSE_ID)", args.warehouse_prod),
         ("--warehouse-test (or DATABRICKS_WAREHOUSE_ID_TEST)", args.warehouse_test),
-    ] if not val.strip()]
+    ]
+    # warehouse-prod is only required when devices actually comes from the prod workspace --
+    # --devices-client test (a prod-free end-to-end test run) has no other use for it.
+    if args.devices_client == "prod":
+        required_values.append(("--warehouse-prod (or DATABRICKS_WAREHOUSE_ID)", args.warehouse_prod))
+    missing = [name for name, val in required_values if not val.strip()]
 
     if missing:
         print("Error: the following required values are not set:")
@@ -675,8 +690,13 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
-    prod_client = get_client_for_env("prod")
+    # prod_client is only constructed when actually needed (devices_client == "prod", the
+    # default) -- an end-to-end test run with --devices-client test and no other TABLE_REGISTRY
+    # entry using client_key='prod' should need zero prod credentials, not just a table path
+    # override. test_client is unconditional -- users and every current TABLE_REGISTRY entry
+    # need it regardless.
     test_client = get_client_for_env("test")
+    prod_client = get_client_for_env("prod") if args.devices_client == "prod" else test_client
     default_raw, default_drata = default_output_paths(test_mode=args.test_mode)
     raw_path = Path(args.output_raw) if args.output_raw else default_raw
     drata_path = Path(args.output_drata) if args.output_drata else default_drata
@@ -841,8 +861,10 @@ def main() -> None:
             device_filter = _user_device_filter(chunk_names)
             print(f"  Pulling devices scoped to {len(chunk_names)} usernames (user_name0, excluding servers/shared) ...")
 
+        devices_client = prod_client if args.devices_client == "prod" else test_client
+        devices_warehouse = args.warehouse_prod if args.devices_client == "prod" else args.warehouse_test
         devices = pull_table(
-            prod_client, args.devices, args.warehouse_prod, "devices",
+            devices_client, args.devices, devices_warehouse, "devices",
             filter_sql=device_filter,
             timeout=args.timeout,
         )
