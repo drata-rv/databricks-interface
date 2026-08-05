@@ -39,7 +39,36 @@ from db.queries import rows_to_records
 from db.secrets import get_secret
 from db.transform import transform_all, apply_test_overrides, apply_sandbox_overrides, decode_security_center_state
 
+
+def _apply_cli_env_overrides() -> None:
+    """Apply any --env KEY=VALUE pairs from argv to os.environ before anything else in this
+    process reads an env var (argparse defaults below, TABLE_REGISTRY lookups, get_secret()'s
+    scope resolution).
+
+    Databricks serverless python_wheel_task has no environment-variable injection mechanism
+    at any level -- job, task, or environment spec (confirmed against Jobs API docs and the
+    serverless compute limitations page, which names job/task parameters as the replacement,
+    2026-08-04). Job parameters (argv) are the only supported channel into the running
+    process. This lets one job parameter carry any of this codebase's existing DATABRICKS_*
+    env vars (secret scope, warehouse IDs, table paths) straight through to the exact same
+    os.getenv()-based resolution already used everywhere else in db/auth.py, db/secrets.py,
+    and TABLE_REGISTRY -- no dedicated CLI flag or extra plumbing needed per variable, and no
+    change needed anywhere else when a new DATABRICKS_* var is added later.
+    """
+    argv = sys.argv[1:]
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--env" and i + 1 < len(argv):
+            key, sep, value = argv[i + 1].partition("=")
+            if sep:
+                os.environ[key] = value
+            i += 2
+        else:
+            i += 1
+
+
 load_env()
+_apply_cli_env_overrides()
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +515,20 @@ def default_output_paths(test_mode: bool = False) -> Tuple[Path, Path]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Pull SCCM tables from Databricks, merge by user, transform to Drata MDM format."
+    )
+    parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Set an environment variable before any other config is resolved (repeatable). "
+            "Already applied from sys.argv by _apply_cli_env_overrides() before this parser "
+            "built its defaults -- registered here only so --help documents it and argparse "
+            "doesn't reject it as unrecognized. This is how a Databricks job parameter "
+            "carries a DATABRICKS_* env var into a serverless python_wheel_task, which has "
+            "no environment-variable injection mechanism of its own."
+        ),
     )
     parser.add_argument(
         "--devices",

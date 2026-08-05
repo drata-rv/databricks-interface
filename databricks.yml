@@ -9,15 +9,21 @@
 # not available in the environment this was authored in. Run it on a machine with the CLI
 # installed before deploying, and expect to fix minor schema issues on the first pass.
 #
-# KNOWN GAP: this skeleton does not yet wire task-level environment variables (table paths,
-# DATABRICKS_SECRET_SCOPE_PROD/_TEST, etc.) into the running process -- the variables above
-# are declared but not yet consumed by the job spec. Confirm the correct mechanism for a
-# python_wheel_task on serverless compute (environments.spec may need an env/vars key, or
-# this may require a base_parameters-style passthrough) once validated against a real CLI.
+# RESOLVED (2026-08-04): serverless python_wheel_task has NO environment-variable injection
+# mechanism at any level -- confirmed against Databricks' Jobs API docs and the serverless
+# compute limitations page, which states outright: "Environment variables. Instead, Databricks
+# recommends using widgets to create job and task parameters." spark_env_vars only exists on a
+# classic new_cluster spec, which serverless (environment_key/environments.spec) doesn't have.
+# So the fix is NOT an env key on environments.spec -- there isn't one. Instead, extract_devices.py
+# now takes a repeatable `--env KEY=VALUE` CLI flag (applied to os.environ before anything else
+# reads a DATABRICKS_* var, including argparse's own defaults) -- see
+# etl/extract_devices.py::_apply_cli_env_overrides(). Every table/warehouse/secret-scope
+# variable below is passed through that flag in the task's `parameters` list.
 #
-# Four placeholders below block a `prod` target deploy (not `dev`, not writing/reviewing
-# this code): the two per-workspace secret scope names, the job's service-principal identity,
-# and the prod workspace host. See README.md's "Running on Databricks" section for who owns each.
+# Two placeholders below still block real execution (not deploy) until Nationwide sends the
+# actual values: the two per-workspace secret scope names. The job's service-principal identity
+# and the prod workspace host separately block only a `prod` target deploy. See README.md's
+# "Running on Databricks" section for who owns each.
 #
 # Auth: Nationwide's security policy prefers OAuth M2M (service principal) over a personal
 # access token -- confirmed by Terry Hardaway 2026-07-13. db/auth.py's get_client_for_env()
@@ -48,6 +54,33 @@ variables:
       databricks-client-id-test / databricks-client-secret-test (or databricks-token-test).
       Do not deploy until this is set to the real scope name.
     default: "CHANGE_ME_secret_scope_test"
+  # Table paths below are NOT placeholders -- real values from .env.example, confirmed
+  # against actual SCCM tables 2026-07-15 ("SCCM Test Tables - Updated 7-15.xlsx"). They were
+  # already known; the only bug was that databricks.yml never passed them to the running job.
+  devices_table:
+    description: Fully qualified prod device table (DATABRICKS_TABLE_DEVICES).
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_v_r_system_temp"
+  users_table:
+    description: Fully qualified test-workspace user identity table (DATABRICKS_TABLE_USERS).
+    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_r_user"
+  table_windows_update:
+    description: Windows Update secondary table (DATABRICKS_TABLE_WINDOWS_UPDATE).
+    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_windowsupdate"
+  table_installed_software:
+    description: Installed software secondary table (DATABRICKS_TABLE_INSTALLED_SOFTWARE).
+    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_installed_software"
+  table_antivirus:
+    description: Antivirus product table, feeds antivirusEnabled (DATABRICKS_TABLE_ANTIVIRUS).
+    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_antivirusproduct"
+  table_firewall:
+    description: Firewall product table, pulled but not yet wired to a Drata field (DATABRICKS_TABLE_FIREWALL).
+    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_firewallproduct"
+  table_bitlocker:
+    description: Encrypted volume table, feeds encryptionEnabled (DATABRICKS_TABLE_BITLOCKER).
+    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_encryptable_volume"
+  table_computer_system:
+    description: Computer system table, feeds hardware model (DATABRICKS_TABLE_COMPUTER_SYSTEM).
+    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_computer_system"
 
 artifacts:
   databricks_interface:
@@ -73,9 +106,11 @@ resources:
     extract_devices_job:
       name: extract_devices_job
 
-      # Non-secret config only. Table paths, warehouse IDs, and credentials stay
-      # env/secret-driven (see db/secrets.py) rather than becoming job parameters --
-      # credentials must never flow through job parameters or notebook widgets.
+      # Non-secret config only -- table paths, warehouse IDs, and the secret SCOPE NAME
+      # (not its contents) are job parameters here because serverless python_wheel_task has
+      # no other way to reach the running process (see the RESOLVED note up top). Actual
+      # credentials (host/token/client_id/client_secret) never appear here -- those stay
+      # resolved from the secret scope by db/secrets.py at runtime, exactly as before.
       parameters:
         - name: full
           default: "false"
@@ -87,6 +122,30 @@ resources:
           default: "false"
         - name: limit
           default: "1000"
+        - name: secret_scope_prod
+          default: "${var.secret_scope_name_prod}"
+        - name: secret_scope_test
+          default: "${var.secret_scope_name_test}"
+        - name: warehouse_prod
+          default: "${var.warehouse_id_prod}"
+        - name: warehouse_test
+          default: "${var.warehouse_id_test}"
+        - name: devices_table
+          default: "${var.devices_table}"
+        - name: users_table
+          default: "${var.users_table}"
+        - name: table_windows_update
+          default: "${var.table_windows_update}"
+        - name: table_installed_software
+          default: "${var.table_installed_software}"
+        - name: table_antivirus
+          default: "${var.table_antivirus}"
+        - name: table_firewall
+          default: "${var.table_firewall}"
+        - name: table_bitlocker
+          default: "${var.table_bitlocker}"
+        - name: table_computer_system
+          default: "${var.table_computer_system}"
 
       tasks:
         - task_key: extract_devices
@@ -110,6 +169,35 @@ resources:
             package_name: databricks-interface
             entry_point: extract-devices
             parameters:
+              # --env KEY=VALUE is consumed by _apply_cli_env_overrides() in
+              # etl/extract_devices.py before anything else reads a DATABRICKS_* var --
+              # this is the only channel into a serverless python_wheel_task's process
+              # (see the RESOLVED note up top). Order doesn't matter -- the whole argv is
+              # scanned upfront -- but these are listed first for readability.
+              - "--env"
+              - "DATABRICKS_SECRET_SCOPE_PROD={{job.parameters.secret_scope_prod}}"
+              - "--env"
+              - "DATABRICKS_SECRET_SCOPE_TEST={{job.parameters.secret_scope_test}}"
+              - "--env"
+              - "DATABRICKS_WAREHOUSE_ID={{job.parameters.warehouse_prod}}"
+              - "--env"
+              - "DATABRICKS_WAREHOUSE_ID_TEST={{job.parameters.warehouse_test}}"
+              - "--env"
+              - "DATABRICKS_TABLE_DEVICES={{job.parameters.devices_table}}"
+              - "--env"
+              - "DATABRICKS_TABLE_USERS={{job.parameters.users_table}}"
+              - "--env"
+              - "DATABRICKS_TABLE_WINDOWS_UPDATE={{job.parameters.table_windows_update}}"
+              - "--env"
+              - "DATABRICKS_TABLE_INSTALLED_SOFTWARE={{job.parameters.table_installed_software}}"
+              - "--env"
+              - "DATABRICKS_TABLE_ANTIVIRUS={{job.parameters.table_antivirus}}"
+              - "--env"
+              - "DATABRICKS_TABLE_FIREWALL={{job.parameters.table_firewall}}"
+              - "--env"
+              - "DATABRICKS_TABLE_BITLOCKER={{job.parameters.table_bitlocker}}"
+              - "--env"
+              - "DATABRICKS_TABLE_COMPUTER_SYSTEM={{job.parameters.table_computer_system}}"
               - "--limit"
               - "{{job.parameters.limit}}"
               - "--full"
