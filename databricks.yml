@@ -279,7 +279,7 @@ targets:
       # devices_table override, falling back to the top-level default) once that's confirmed
       # and it's time to test against the real device inventory.
       devices_client: "test"
-      devices_table: "si_test_catalog.nw_harmonized_sensitive.t_sccm_v_r_system_temp"
+      devices_table: "si_test_catalog.nw_harmonized_sensitive.t_sccm_r_system"
 
   prod:
     mode: production
