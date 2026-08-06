@@ -54,18 +54,16 @@ variables:
       workspace (nationwide-irm-test-ohio) -- "Drata ETL" is the scope, named after this
       integration. Holds databricks-client-id-test / databricks-client-secret-test (or
       databricks-token-test as a PAT fallback). Contents not yet verified -- confirm the
-      expected keys actually exist (dbutils.secrets.list(scope="Drata ETL")) before relying
-      on this for a real run; the scope existing doesn't guarantee it's populated.
-    default: "Drata ETL"
+      expected keys actually exist (dbutils.secrets.list(scope="dbx_irg_dev_comp_sp")) before
+      relying on this for a real run; the scope existing doesn't guarantee it's populated.
+    default: "dbx_irg_dev_comp_sp"
   secret_scope_default:
     description: >
       Used for db/secrets.py::get_secret() calls that pass no explicit scope -- currently
       only drata-api-key/drata-connection-id (etl/extract_devices.py). These aren't
-      per-workspace, so they don't fit secret_scope_name_prod/_test's split. Defaulted to
-      the same "Drata ETL" scope on the (unverified) assumption it holds the Drata keys too,
-      since it's the one scope for this whole integration -- confirm with
-      dbutils.secrets.list(scope="Drata ETL") before relying on this for a real push.
-    default: "Drata ETL"
+      per-workspace, so they don't fit secret_scope_name_prod/_test's split. Same scope as
+      secret_scope_name_test above -- Drata credentials were added there directly.
+    default: "dbx_irg_dev_comp_sp"
   devices_client:
     description: >
       Which workspace connection extract-devices.py uses for the devices table -- "prod"
@@ -274,7 +272,7 @@ targets:
       host: https://nationwide-irm-test-ohio.cloud.databricks.com
     variables:
       secret_scope_name_prod: "CHANGE_ME_secret_scope_prod"
-      secret_scope_name_test: "Drata ETL"
+      secret_scope_name_test: "dbx_irg_dev_comp_sp"
       # First real end-to-end validation: test data only, zero prod dependency, so this run
       # can prove the pipeline pulls/transforms/pushes to Drata correctly before prod
       # credentials exist at all. Switch devices_client back to "prod" (and drop this
