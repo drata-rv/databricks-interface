@@ -130,7 +130,7 @@ resources:
       # resolved from the secret scope by db/secrets.py at runtime, exactly as before.
       parameters:
         - name: full
-          default: "false"
+          default: "true"
         - name: sandbox
           default: "false"
         - name: test_mode
