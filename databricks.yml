@@ -71,6 +71,17 @@ variables:
       workspace's catalog, for an end-to-end test run needing zero prod credentials).
       Overridden to "test" in the dev target below.
     default: "prod"
+  sandbox:
+    description: >
+      Default for the "sandbox" job parameter -- "true" rewrites personnelId to
+      @sandbox.nationwide.com before pushing (see etl/extract_devices.py). Defaults "true"
+      here so a parameterless "Run now" on dev can't accidentally push real personnelIds --
+      full defaults true too (entire population, no --limit), so without this a bare run
+      would push real, non-sandboxed data for every user. Set to "false" deliberately (as a
+      job parameter override, not by changing this default) when actually ready for a real
+      push. prod's own target below does not override this -- confirm real intent explicitly
+      per run there instead of relying on any default.
+    default: "true"
   # Table paths below are NOT placeholders -- real values from .env.example, confirmed
   # against actual SCCM tables 2026-07-15 ("SCCM Test Tables - Updated 7-15.xlsx"). They were
   # already known; the only bug was that databricks.yml never passed them to the running job.
@@ -132,7 +143,7 @@ resources:
         - name: full
           default: "true"
         - name: sandbox
-          default: "false"
+          default: "${var.sandbox}"
         - name: test_mode
           default: "false"
         - name: dry_run
@@ -178,11 +189,11 @@ resources:
           # gate in etl/extract_devices.py) -- a retried run re-pushes the same data,
           # it does not create duplicates.
           max_retries: 1
-          email_notifications:
-            on_failure:
-              - CHANGE_ME_ops_distribution_list@example.com # PLACEHOLDER -- confirm on-call/ops list
-          # Only alert on the final retry attempt, not every one -- avoids spamming the
-          # ops list once per attempt when max_retries kicks in.
+          # No email_notifications block on purpose -- no real ops/on-call address exists yet.
+          # A fake placeholder here would silently fail delivery and look like alerting is
+          # configured when it isn't. Add on_failure back (with alert_on_last_attempt: true
+          # below, to avoid spamming once per retry) once Terry/Nationwide provides a real
+          # distribution list.
           webhook_notifications: {}
           notification_settings:
             alert_on_last_attempt: true
