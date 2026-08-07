@@ -170,10 +170,10 @@ resources:
 
       tasks:
         - task_key: extract_devices
-          # Sized generously above an expected --full run (tens of thousands of users,
-          # chunked 500 at a time) with headroom for cold serverless warehouse starts.
-          # Adjust once a real --full run's wall-clock time is measured.
-          timeout_seconds: 14400
+          # 14400 (4h) measured too short on a real --full run against ~9,925 users --
+          # timed out before completion. Databricks serverless SQL warehouse compute is slow
+          # enough that this population could take 24h+. Set generously above that.
+          timeout_seconds: 172800
           # Safe because Drata upserts on externalId (see the duplicate-externalId quality
           # gate in etl/extract_devices.py) -- a retried run re-pushes the same data,
           # it does not create duplicates.
