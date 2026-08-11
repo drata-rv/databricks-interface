@@ -861,6 +861,24 @@ def main() -> None:
             device_filter = _user_device_filter(chunk_names)
             print(f"  Pulling devices scoped to {len(chunk_names)} usernames (user_name0, excluding servers/shared) ...")
 
+        if args.devices_client == "test":
+            # t_sccm_r_system is a raw, periodically re-ingested landing table, not a
+            # deduplicated device master -- confirmed 2026-08-07 via a real run: 3,074,075
+            # rows for only 60,836 distinct resource_id (~56 rows/device, uniform across
+            # every device checked), clustered on __date/__hour. Every past ingestion batch
+            # is still in the table. Without this filter the same device appears dozens of
+            # times, all sharing the same fallback externalId once serial_number/aad_device_id
+            # are absent (common on this table) -- this is what rejected ~50,000 of ~50,483
+            # transformed records as externalId collisions on the 2026-08-07 full run.
+            # Restricting to the single latest (__date, __hour) batch brings it back to one
+            # row per device. Gated on devices_client == "test" -- prod's devices table
+            # (a "v_"-prefixed view) is a different object and may not even have these columns.
+            device_filter += (
+                f" AND __date = (SELECT MAX(__date) FROM {args.devices})"
+                f" AND __hour = (SELECT MAX(__hour) FROM {args.devices}"
+                f" WHERE __date = (SELECT MAX(__date) FROM {args.devices}))"
+            )
+
         devices_client = prod_client if args.devices_client == "prod" else test_client
         devices_warehouse = args.warehouse_prod if args.devices_client == "prod" else args.warehouse_test
         devices = pull_table(
