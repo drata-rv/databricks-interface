@@ -284,13 +284,14 @@ targets:
     variables:
       secret_scope_name_prod: "CHANGE_ME_secret_scope_prod"
       secret_scope_name_test: "dbx_irg_dev_comp_sp"
-      # First real end-to-end validation: test data only, zero prod dependency, so this run
-      # can prove the pipeline pulls/transforms/pushes to Drata correctly before prod
-      # credentials exist at all. Switch devices_client back to "prod" (and drop this
-      # devices_table override, falling back to the top-level default) once that's confirmed
-      # and it's time to test against the real device inventory.
-      devices_client: "test"
-      devices_table: "si_test_catalog.nw_harmonized_sensitive.t_sccm_r_system"
+      # 2026-08: moving devices to the real prod inventory (si_prod_catalog) now that the
+      # test-only path is validated. devices_client/devices_table dropped -- both fall back
+      # to their top-level defaults ("prod" / si_prod_catalog...t_sccm_v_r_system_temp).
+      # secret_scope_name_prod above is STILL a placeholder -- this will fail at
+      # get_client_for_env("prod") exactly like the very first real deploy did, until it's
+      # set to the real prod secret scope name. Users/secondary tables stay on
+      # si_test_catalog -- see databricks.yml's top-level variable comments, that's the
+      # permanent design, not a test-phase placeholder.
 
   prod:
     mode: production
