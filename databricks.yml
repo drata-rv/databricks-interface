@@ -43,11 +43,12 @@ variables:
     default: "ed10729e21418123"
   secret_scope_name_prod:
     description: >
-      PLACEHOLDER -- Nationwide confirmed this scope was created 2026-07-13 but has not yet
-      sent the actual name. Holds databricks-client-id-prod / databricks-client-secret-prod
-      (or databricks-token-prod as a PAT fallback) plus DRATA_API_KEY / DRATA_CONNECTION_ID.
-      Do not deploy until this is set to the real scope name.
-    default: "CHANGE_ME_secret_scope_prod"
+      Confirmed 2026-08-14 -- dbx_irg_prod_comp_sp, matching the dev/test naming pattern
+      (dbx_irg_dev_comp_sp). Holds databricks-host-prod / databricks-client-id-prod /
+      databricks-client-secret-prod (or databricks-token-prod as a PAT fallback). Contents
+      not yet verified populated -- confirm with dbutils.secrets.list(scope=
+      "dbx_irg_prod_comp_sp") before relying on this for a real run.
+    default: "dbx_irg_prod_comp_sp"
   secret_scope_name_test:
     description: >
       Confirmed 2026-08-04 via dbutils.secrets.listScopes() run directly against the test
@@ -304,7 +305,7 @@ targets:
     workspace:
       host: https://nationwide-irm-test-ohio.cloud.databricks.com
     variables:
-      secret_scope_name_prod: "CHANGE_ME_secret_scope_prod"
+      secret_scope_name_prod: "dbx_irg_prod_comp_sp"
       secret_scope_name_test: "dbx_irg_dev_comp_sp"
       # 2026-08: moving devices to the real prod inventory (si_prod_catalog) now that the
       # test-only path is validated. devices_client/devices_table dropped -- both fall back
