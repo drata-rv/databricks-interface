@@ -123,6 +123,31 @@ _SW_BATCH_SIZE = 200
 _PERSONNEL_CHECK_WORKERS = 5
 _PIPELINE_CHUNK_SIZE = 500
 
+# All six secondary tables confirmed (2026-08-14, direct counts against si_prod_catalog) to
+# be raw, periodically re-ingested landing tables -- same __date/__hour/__ingest_ts/__row_hash
+# architecture as t_sccm_r_system, which was 3,074,075 rows for only 60,836 distinct devices
+# before the same latest-batch-only filter was applied there. Confirmed batch counts:
+# windows_update 1,888,445 rows/41,024 devices/50 batches; installed_software 166,528,900
+# rows/41,015 devices/50 batches; antivirus_product 1,169,805/31,075/21; firewall_product
+# 1,159,233/31,059/21; bitlocker (encryptable_volume) 747,263/36,296/21; computer_system
+# 794,779/39,350/21. Every one needs the identical latest-batch-only treatment or every
+# device's rows multiply across every historical ingestion batch.
+_RAW_LANDING_TABLES = {
+    'windows_update', 'installed_software', 'antivirus_product',
+    'firewall_product', 'bitlocker', 'computer_system',
+}
+
+
+def _latest_batch_clause(table_path: str) -> str:
+    """Restrict a raw landing table to its single most recent (__date, __hour) ingestion
+    batch -- see _RAW_LANDING_TABLES. Without this, every device/record appears once per
+    historical batch instead of once, total."""
+    return (
+        f" AND __date = (SELECT MAX(__date) FROM {table_path})"
+        f" AND __hour = (SELECT MAX(__hour) FROM {table_path}"
+        f" WHERE __date = (SELECT MAX(__date) FROM {table_path}))"
+    )
+
 
 def is_internal(col: str) -> bool:
     return any(col.startswith(p) for p in STRIP_PREFIXES)
@@ -140,24 +165,24 @@ TableSpec = collections.namedtuple(
 # batched      : True = use pull_table_batched() (IN-clause chunked to _SW_BATCH_SIZE)
 
 TABLE_REGISTRY = [
-    TableSpec('windows_update',     'DATABRICKS_TABLE_WINDOWS_UPDATE',     'test', 'resource_id', True,  False),
-    TableSpec('installed_software', 'DATABRICKS_TABLE_INSTALLED_SOFTWARE', 'test', 'resource_id', True,  True),
+    TableSpec('windows_update',     'DATABRICKS_TABLE_WINDOWS_UPDATE',     'prod', 'resource_id', True,  False),
+    TableSpec('installed_software', 'DATABRICKS_TABLE_INSTALLED_SOFTWARE', 'prod', 'resource_id', True,  True),
     # Antivirus/firewall product tables (WSC-style, confirmed 2026-06-24). Batched
     # defensively -- row counts unconfirmed, treat as potentially large like installed_software.
     # antivirus_product feeds antivirusEnabled (presence-based: any registered row = protected;
     # see _antivirus_from_securitycenter in transform.py). firewall_product is pulled/merged
     # only -- transform.py has no reference to it, so it cannot reach the Drata push payload.
-    TableSpec('antivirus_product',  'DATABRICKS_TABLE_ANTIVIRUS',           'test', 'resource_id', False, True),
-    TableSpec('firewall_product',   'DATABRICKS_TABLE_FIREWALL',            'test', 'resource_id', False, True),
+    TableSpec('antivirus_product',  'DATABRICKS_TABLE_ANTIVIRUS',           'prod', 'resource_id', False, True),
+    TableSpec('firewall_product',   'DATABRICKS_TABLE_FIREWALL',            'prod', 'resource_id', False, True),
     # Confirmed 2026-07-15 (SCCM Test Tables - Updated 7-15.xlsx): t_sccm_gs_encryptable_volume
     # feeds encryptionEnabled (protection_status0); t_sccm_gs_computer_system feeds a real
     # hardware model (model0), fixing the prior CPU-type-as-model bug.
-    TableSpec('bitlocker',          'DATABRICKS_TABLE_BITLOCKER',           'test', 'resource_id', False, False),
-    TableSpec('computer_system',    'DATABRICKS_TABLE_COMPUTER_SYSTEM',     'test', 'resource_id', False, False),
+    TableSpec('bitlocker',          'DATABRICKS_TABLE_BITLOCKER',           'prod', 'resource_id', False, False),
+    TableSpec('computer_system',    'DATABRICKS_TABLE_COMPUTER_SYSTEM',     'prod', 'resource_id', False, False),
     # Uncomment when Nationwide confirms table names:
-    # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'test', 'resource_id', False, False),
-    # TableSpec('services',        'DATABRICKS_TABLE_SERVICES',        'test', 'resource_id', False, False),
-    # TableSpec('network_adapter', 'DATABRICKS_TABLE_NETWORK_ADAPTER', 'test', 'resource_id', False, False),
+    # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'prod', 'resource_id', False, False),
+    # TableSpec('services',        'DATABRICKS_TABLE_SERVICES',        'prod', 'resource_id', False, False),
+    # TableSpec('network_adapter', 'DATABRICKS_TABLE_NETWORK_ADAPTER', 'prod', 'resource_id', False, False),
 ]
 
 
@@ -290,11 +315,14 @@ def pull_table_batched(
     id_column: str = "resource_id",
     timeout: int = 300,
     required: bool = True,
+    extra_filter: str = "",
 ) -> Optional[List[Dict[str, Any]]]:
     """Pull a large table by chunking the IN-clause into batches of _SW_BATCH_SIZE.
 
     When required=False, a batch that exhausts retries aborts just this table for this
-    chunk (returns None) instead of exiting the whole process.
+    chunk (returns None) instead of exiting the whole process. extra_filter is appended
+    (already including its own leading " AND ...") to every batch's filter -- see
+    _latest_batch_clause() / _RAW_LANDING_TABLES.
     """
     all_records: List[Dict[str, Any]] = []
     total_batches = (len(ids) + _SW_BATCH_SIZE - 1) // _SW_BATCH_SIZE
@@ -304,7 +332,7 @@ def pull_table_batched(
         records = pull_table(
             client, table, warehouse_id,
             f"{label} (batch {batch_num}/{total_batches})",
-            filter_sql=_ids_filter(batch, column=id_column),
+            filter_sql=_ids_filter(batch, column=id_column) + extra_filter,
             timeout=timeout,
             required=required,
         )
@@ -690,13 +718,15 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
-    # prod_client is only constructed when actually needed (devices_client == "prod", the
-    # default) -- an end-to-end test run with --devices-client test and no other TABLE_REGISTRY
-    # entry using client_key='prod' should need zero prod credentials, not just a table path
-    # override. test_client is unconditional -- users and every current TABLE_REGISTRY entry
-    # need it regardless.
+    # 2026-08-14: both clients are unconditional now. Users and every current TABLE_REGISTRY
+    # entry moved to client_key='prod' (all six secondary tables + users_table are sourced
+    # from si_prod_catalog), so prod_client is needed regardless of --devices-client --
+    # making it conditional on that flag (as it briefly was) would silently point the
+    # secondary-table pulls at test_client's connection whenever --devices-client test is
+    # used, querying si_prod_catalog with the wrong identity. test_client stays available
+    # for a --devices-client test override on the devices pull specifically.
     test_client = get_client_for_env("test")
-    prod_client = get_client_for_env("prod") if args.devices_client == "prod" else test_client
+    prod_client = get_client_for_env("prod")
     default_raw, default_drata = default_output_paths(test_mode=args.test_mode)
     raw_path = Path(args.output_raw) if args.output_raw else default_raw
     drata_path = Path(args.output_drata) if args.output_drata else default_drata
@@ -771,7 +801,7 @@ def main() -> None:
         if not users_table:
             print("  [FAIL] DATABRICKS_TABLE_USERS is required but not set (or use --local-users)")
             sys.exit(1)
-        all_users = pull_table(test_client, users_table, args.warehouse_test, "users", timeout=args.timeout)
+        all_users = pull_table(prod_client, users_table, args.warehouse_prod, "users", timeout=args.timeout)
 
     if args.full:
         print(f"  Full sync: processing all {len(all_users)} users.")
@@ -931,15 +961,17 @@ def main() -> None:
                 pulled[spec.label] = None
                 continue
             wh = args.warehouse_test if spec.client_key == 'test' else args.warehouse_prod
+            latest_batch = _latest_batch_clause(table_path) if spec.label in _RAW_LANDING_TABLES else ""
             if spec.batched:
                 data = pull_table_batched(
                     clients[spec.client_key], table_path, wh, spec.label,
                     ids=resource_ids, timeout=args.timeout, required=spec.required,
+                    extra_filter=latest_batch,
                 )
             else:
                 data = pull_table(
                     clients[spec.client_key], table_path, wh, spec.label,
-                    filter_sql=filter_map[spec.filter_type], timeout=args.timeout, required=spec.required,
+                    filter_sql=filter_map[spec.filter_type] + latest_batch, timeout=args.timeout, required=spec.required,
                 )
             pulled[spec.label] = data
             if data is not None and not data:

@@ -82,33 +82,55 @@ variables:
       push. prod's own target below does not override this -- confirm real intent explicitly
       per run there instead of relying on any default.
     default: "true"
-  # Table paths below are NOT placeholders -- real values from .env.example, confirmed
-  # against actual SCCM tables 2026-07-15 ("SCCM Test Tables - Updated 7-15.xlsx"). They were
-  # already known; the only bug was that databricks.yml never passed them to the running job.
+  # 2026-08-14: switched from si_test_catalog to si_prod_catalog -- confirmed via SHOW
+  # TABLES that every table below exists under the identical name in si_prod_catalog (only
+  # devices differs -- prod has both the raw t_sccm_r_system and the deduplicated
+  # t_sccm_v_r_system_temp view; test only has the raw one). TABLE_REGISTRY's client_key and
+  # the users_table pull were also switched from 'test'/test_client to 'prod'/prod_client to
+  # match -- these now query si_prod_catalog using the prod SP's connection, not test's. All
+  # six secondary tables were confirmed the same day to be raw landing tables (multiple
+  # ingestion batches per resource_id) -- etl/extract_devices.py applies a latest-batch-only
+  # filter to each automatically, see _RAW_LANDING_TABLES.
   devices_table:
     description: Fully qualified prod device table (DATABRICKS_TABLE_DEVICES).
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_v_r_system_temp"
   users_table:
-    description: Fully qualified test-workspace user identity table (DATABRICKS_TABLE_USERS).
-    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_r_user"
+    description: Fully qualified user identity table (DATABRICKS_TABLE_USERS).
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_r_user"
   table_windows_update:
-    description: Windows Update secondary table (DATABRICKS_TABLE_WINDOWS_UPDATE).
-    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_windowsupdate"
+    description: >
+      Windows Update secondary table (DATABRICKS_TABLE_WINDOWS_UPDATE). Confirmed
+      2026-08-14 to be a raw landing table (__date/__hour ingestion columns) -- code applies
+      a latest-batch-only filter automatically, see _RAW_LANDING_TABLES in
+      etl/extract_devices.py.
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_windowsupdate"
   table_installed_software:
-    description: Installed software secondary table (DATABRICKS_TABLE_INSTALLED_SOFTWARE).
-    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_installed_software"
+    description: >
+      Installed software secondary table (DATABRICKS_TABLE_INSTALLED_SOFTWARE). Same raw
+      landing table pattern as table_windows_update -- see _RAW_LANDING_TABLES.
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_installed_software"
   table_antivirus:
-    description: Antivirus product table, feeds antivirusEnabled (DATABRICKS_TABLE_ANTIVIRUS).
-    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_antivirusproduct"
+    description: >
+      Antivirus product table, feeds antivirusEnabled (DATABRICKS_TABLE_ANTIVIRUS). Same raw
+      landing table pattern -- see _RAW_LANDING_TABLES.
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_antivirusproduct"
   table_firewall:
-    description: Firewall product table, pulled but not yet wired to a Drata field (DATABRICKS_TABLE_FIREWALL).
-    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_firewallproduct"
+    description: >
+      Firewall product table, pulled but not yet wired to a Drata field
+      (DATABRICKS_TABLE_FIREWALL). Same raw landing table pattern -- see _RAW_LANDING_TABLES.
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_firewallproduct"
   table_bitlocker:
-    description: Encrypted volume table, feeds encryptionEnabled (DATABRICKS_TABLE_BITLOCKER).
-    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_encryptable_volume"
+    description: >
+      Encrypted volume table, feeds encryptionEnabled (DATABRICKS_TABLE_BITLOCKER). Same raw
+      landing table pattern -- see _RAW_LANDING_TABLES.
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_encryptable_volume"
   table_computer_system:
-    description: Computer system table, feeds hardware model (DATABRICKS_TABLE_COMPUTER_SYSTEM).
-    default: "si_test_catalog.nw_harmonized_sensitive.t_sccm_gs_computer_system"
+    description: >
+      Computer system table, feeds hardware model (DATABRICKS_TABLE_COMPUTER_SYSTEM).
+      Confirmed 2026-08-14 (794,779 rows / 39,350 distinct devices / 21 ingest batches) to be
+      the same raw landing table pattern as the other five -- included in
+      _RAW_LANDING_TABLES.
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_computer_system"
 
 artifacts:
   databricks_interface:
