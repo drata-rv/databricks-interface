@@ -322,8 +322,8 @@ targets:
       # used for the si_prod_catalog diagnostics this same day.
       host: "https://nationwide-irm-prod-ohio.cloud.databricks.com"
     run_as:
-      # STILL A PLACEHOLDER -- needs the prod service principal's Application ID (a UUID,
-      # not its display name "dbx_irg_prod_comp_sp" -- see README's "Adding the job's
-      # service principal" section). `databricks bundle deploy -t prod` will not work
-      # correctly until this is a real Application ID.
-      service_principal_name: "CHANGE_ME_service_principal"
+      # Application ID of dbx_irg_prod_comp_sp, confirmed 2026-08-14. Whoever runs
+      # `databricks bundle deploy -t prod` still needs CAN_USE granted on this exact SP --
+      # a separate permission from anything above, and from the SP's own workspace
+      # assignment (see README's "Adding the job's service principal" section).
+      service_principal_name: "8d56d7cd-cbfc-4b91-ad9c-03c7d0973774"
