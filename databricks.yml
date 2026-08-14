@@ -318,11 +318,12 @@ targets:
   prod:
     mode: production
     workspace:
-      # PLACEHOLDER -- pending confirmation of the prod deploy target's reachable/authorized
-      # workspace host. See README.md's "Prerequisites before deploying to prod".
-      host: "CHANGE_ME_prod_workspace_host"
+      # Confirmed 2026-08-14 directly from the browser URL of the prod workspace notebook
+      # used for the si_prod_catalog diagnostics this same day.
+      host: "https://nationwide-irm-prod-ohio.cloud.databricks.com"
     run_as:
-      # PLACEHOLDER -- pending a named owner for this job's service-principal identity. Once
-      # named, this is also the OAuth M2M service principal Nationwide provisions per the
-      # auth note above.
+      # STILL A PLACEHOLDER -- needs the prod service principal's Application ID (a UUID,
+      # not its display name "dbx_irg_prod_comp_sp" -- see README's "Adding the job's
+      # service principal" section). `databricks bundle deploy -t prod` will not work
+      # correctly until this is a real Application ID.
       service_principal_name: "CHANGE_ME_service_principal"
