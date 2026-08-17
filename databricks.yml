@@ -322,6 +322,16 @@ targets:
       # Confirmed 2026-08-14 directly from the browser URL of the prod workspace notebook
       # used for the si_prod_catalog diagnostics this same day.
       host: "https://nationwide-irm-prod-ohio.cloud.databricks.com"
+      # Root path fix (2026-08-17): with no root_path set, the CLI defaulted to the
+      # deploying user's own personal path (/Workspace/Users/hardat1@nationwide.com/...),
+      # which the run_as service principal has no read access to -- job failed with
+      # "Library installation failed... file does not exist or the user does not have
+      # permission to read the library file" trying to install its own wheel from there.
+      # Databricks' own run_as documentation's worked example for this exact scenario
+      # (production target + service-principal run_as) uses a /Shared path instead, which
+      # both the deploying human and the run_as SP can read -- not a path under either
+      # identity's personal /Workspace/Users/ folder.
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
     run_as:
       # Application ID of dbx_irg_prod_comp_sp, confirmed 2026-08-14. Whoever runs
       # `databricks bundle deploy -t prod` still needs CAN_USE granted on this exact SP --
