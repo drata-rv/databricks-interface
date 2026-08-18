@@ -338,3 +338,14 @@ targets:
       # a separate permission from anything above, and from the SP's own workspace
       # assignment (see README's "Adding the job's service principal" section).
       service_principal_name: "8d56d7cd-cbfc-4b91-ad9c-03c7d0973774"
+    variables:
+      # secret_scope_default's top-level default ("dbx_irg_dev_comp_sp") is correct for the
+      # dev target (runs against the test workspace, where that scope lives) but wrong here --
+      # this target runs in the prod workspace, which doesn't have a dbx_irg_dev_comp_sp scope
+      # for the prod SP to read. Found 2026-08-18 by Terry Hardaway via a real prod run
+      # PERMISSION_DENIED on secrets.get. NOTE: this only repoints which scope is read --
+      # confirm drata-api-key/drata-connection-id actually exist in dbx_irg_prod_comp_sp
+      # (dbutils.secrets.list(scope="dbx_irg_prod_comp_sp")) before assuming this alone fixes
+      # the run; if those two keys were never copied to the prod scope, expect the next error
+      # to be a secret-not-found instead.
+      secret_scope_default: "dbx_irg_prod_comp_sp"
