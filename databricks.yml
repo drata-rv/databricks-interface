@@ -84,17 +84,23 @@ variables:
       per run there instead of relying on any default.
     default: "true"
   # 2026-08-14: switched from si_test_catalog to si_prod_catalog -- confirmed via SHOW
-  # TABLES that every table below exists under the identical name in si_prod_catalog (only
-  # devices differs -- prod has both the raw t_sccm_r_system and the deduplicated
-  # t_sccm_v_r_system_temp view; test only has the raw one). TABLE_REGISTRY's client_key and
-  # the users_table pull were also switched from 'test'/test_client to 'prod'/prod_client to
-  # match -- these now query si_prod_catalog using the prod SP's connection, not test's. All
-  # six secondary tables were confirmed the same day to be raw landing tables (multiple
-  # ingestion batches per resource_id) -- etl/extract_devices.py applies a latest-batch-only
-  # filter to each automatically, see _RAW_LANDING_TABLES.
+  # TABLES that every table below exists under the identical name in si_prod_catalog.
+  # TABLE_REGISTRY's client_key and the users_table pull were also switched from
+  # 'test'/test_client to 'prod'/prod_client to match -- these now query si_prod_catalog
+  # using the prod SP's connection, not test's. All six secondary tables were confirmed
+  # the same day to be raw landing tables (multiple ingestion batches per resource_id) --
+  # etl/extract_devices.py applies a latest-batch-only filter to each automatically, see
+  # _RAW_LANDING_TABLES.
+  #
+  # 2026-08-18: devices_table corrected to t_sccm_r_system (was t_sccm_v_r_system_temp).
+  # Terry Hardaway (Nationwide) confirmed the "_temp" table is not the intended production
+  # source -- t_sccm_r_system is. That's the same raw multi-batch landing table test's
+  # devices source already needed a dedup filter for (see the 2026-08-07 note in
+  # etl/extract_devices.py) -- that filter is now applied unconditionally instead of
+  # gated on devices_client=="test", so prod gets the same protection.
   devices_table:
     description: Fully qualified prod device table (DATABRICKS_TABLE_DEVICES).
-    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_v_r_system_temp"
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_r_system"
   users_table:
     description: Fully qualified user identity table (DATABRICKS_TABLE_USERS).
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_r_user"
@@ -309,7 +315,7 @@ targets:
       secret_scope_name_test: "dbx_irg_dev_comp_sp"
       # 2026-08: moving devices to the real prod inventory (si_prod_catalog) now that the
       # test-only path is validated. devices_client/devices_table dropped -- both fall back
-      # to their top-level defaults ("prod" / si_prod_catalog...t_sccm_v_r_system_temp).
+      # to their top-level defaults ("prod" / si_prod_catalog...t_sccm_r_system).
       # secret_scope_name_prod above is STILL a placeholder -- this will fail at
       # get_client_for_env("prod") exactly like the very first real deploy did, until it's
       # set to the real prod secret scope name. Users/secondary tables stay on
