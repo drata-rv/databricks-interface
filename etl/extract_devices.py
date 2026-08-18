@@ -718,15 +718,17 @@ def main() -> None:
             print(f"  {m}")
         sys.exit(1)
 
-    # 2026-08-14: both clients are unconditional now. Users and every current TABLE_REGISTRY
-    # entry moved to client_key='prod' (all six secondary tables + users_table are sourced
-    # from si_prod_catalog), so prod_client is needed regardless of --devices-client --
-    # making it conditional on that flag (as it briefly was) would silently point the
-    # secondary-table pulls at test_client's connection whenever --devices-client test is
-    # used, querying si_prod_catalog with the wrong identity. test_client stays available
-    # for a --devices-client test override on the devices pull specifically.
-    test_client = get_client_for_env("test")
+    # 2026-08-17: test_client construction is conditional again -- secret scopes are
+    # workspace-specific, and dbx_irg_dev_comp_sp only exists in the TEST workspace. This
+    # job now also runs on compute hosted in the PROD workspace (-t prod), where that scope
+    # does not exist at all -- an unconditional get_client_for_env("test") failed there with
+    # "Secret does not exist with scope: dbx_irg_dev_comp_sp" before any prod logic ran, on
+    # a real prod deploy 2026-08-17. prod_client stays unconditional -- users and every
+    # current TABLE_REGISTRY entry use client_key='prod' regardless of --devices-client.
+    # test_client is only actually needed for a --devices-client test override (which only
+    # makes sense run against the test/dev target/workspace anyway).
     prod_client = get_client_for_env("prod")
+    test_client = get_client_for_env("test") if args.devices_client == "test" else prod_client
     default_raw, default_drata = default_output_paths(test_mode=args.test_mode)
     raw_path = Path(args.output_raw) if args.output_raw else default_raw
     drata_path = Path(args.output_drata) if args.output_drata else default_drata
