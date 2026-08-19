@@ -18,6 +18,7 @@ import time
 from typing import Any, Dict, List
 
 _MAX_RETRIES = 3
+_MAX_RATE_LIMIT_RETRIES = 8  # separate, more generous budget -- see _push_one_record
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
 _PUSH_WORKERS = 10
 
@@ -103,14 +104,28 @@ class DrataClient:
             print(f"  [{index}/{total}] personnelId={pid}  alias={alias}  externalId={ext_id}")
 
         last_err = None
-        for attempt in range(1, _MAX_RETRIES + 1):
+        attempt = 0            # genuine-error attempts (5xx / network) -- bounded by _MAX_RETRIES
+        rate_limit_attempt = 0  # 429s counted separately -- see _MAX_RATE_LIMIT_RETRIES below.
+        # 10 workers pushing thousands of records against one endpoint will draw real 429s;
+        # a 429 means "slow down," not "this record is broken," so it shouldn't burn the same
+        # small retry budget as a genuine error -- doing so risked reporting a record as
+        # permanently failed (and, combined with the hard-fail-on-any-error push policy,
+        # failing an entire multi-hour run) purely from throttling.
+        while attempt < _MAX_RETRIES:
             try:
                 resp = self._session.post(url, json=record, timeout=self._timeout)
 
                 if resp.status_code == 429:
-                    retry_after = int(resp.headers.get('Retry-After', _RETRY_DELAYS[min(attempt - 1, 1)]))
-                    last_err = f"HTTP 429: rate limited (retry {attempt}/{_MAX_RETRIES})"
-                    print(f"    [RATE LIMIT] personnelId={pid} retrying in {retry_after}s ...")
+                    rate_limit_attempt += 1
+                    if rate_limit_attempt > _MAX_RATE_LIMIT_RETRIES:
+                        last_err = f"HTTP 429: rate limited ({rate_limit_attempt - 1} retries exhausted)"
+                        break
+                    try:
+                        retry_after = int(resp.headers.get('Retry-After', _RETRY_DELAYS[min(rate_limit_attempt - 1, 1)]))
+                    except (TypeError, ValueError):
+                        retry_after = _RETRY_DELAYS[min(rate_limit_attempt - 1, 1)]
+                    last_err = f"HTTP 429: rate limited (retry {rate_limit_attempt}/{_MAX_RATE_LIMIT_RETRIES})"
+                    print(f"    [RATE LIMIT] personnelId={pid} retrying in {retry_after}s (attempt {rate_limit_attempt}/{_MAX_RATE_LIMIT_RETRIES}) ...")
                     time.sleep(retry_after)
                     continue
 
@@ -121,6 +136,7 @@ class DrataClient:
                     return False
 
                 if resp.status_code >= 500:
+                    attempt += 1
                     body = resp.text
                     print(f"    [5XX attempt {attempt}/{_MAX_RETRIES}] personnelId={pid}  HTTP {resp.status_code}: {body}")
                     last_err = f"HTTP {resp.status_code}: {body}"
@@ -135,13 +151,14 @@ class DrataClient:
                 return True
 
             except Exception as e:
+                attempt += 1
                 last_err = str(e)
                 if attempt < _MAX_RETRIES:
                     wait = _RETRY_DELAYS[attempt - 1]
                     print(f"    [RETRY {attempt}/{_MAX_RETRIES}] personnelId={pid}  {e} -- retrying in {wait}s ...")
                     time.sleep(wait)
 
-        print(f"    [FAIL] personnelId={pid}  alias={alias}  all {_MAX_RETRIES} attempts exhausted: {last_err}")
+        print(f"    [FAIL] personnelId={pid}  alias={alias}  all attempts exhausted: {last_err}")
         errors.append({'index': index, 'personnelId': pid, 'alias': alias, 'error': last_err})
         return False
 
@@ -163,7 +180,10 @@ class DrataClient:
                 if resp.status_code == 404:
                     return None
                 if resp.status_code == 429:
-                    wait = int(resp.headers.get('Retry-After', _RETRY_DELAYS[min(attempt - 1, 1)]))
+                    try:
+                        wait = int(resp.headers.get('Retry-After', _RETRY_DELAYS[min(attempt - 1, 1)]))
+                    except (TypeError, ValueError):
+                        wait = _RETRY_DELAYS[min(attempt - 1, 1)]
                     time.sleep(wait)
                     last_err = Exception(f"HTTP 429 rate limited")
                     continue
