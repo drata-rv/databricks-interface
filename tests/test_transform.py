@@ -113,3 +113,37 @@ def test_platform_name_and_version_unknown_when_no_source_available():
     result = transform.format_for_drata(_minimal_features({}))
     assert result['platformName'] == 'WINDOWS'  # _platform_name's own documented fallback
     assert result['platformVersion'] == 'Unknown'
+
+
+def test_apply_sandbox_overrides_rewrites_lowercase_domain():
+    records = [{'personnelId': 'email:wadei1@nationwide.com'}]
+    result = transform.apply_sandbox_overrides(records)
+    assert result[0]['personnelId'] == 'email:wadei1@sandbox.nationwide.com'
+
+
+def test_apply_sandbox_overrides_rewrites_capital_n_domain():
+    """Regression: a real @Nationwide.com (capital N) record was left unrewritten by the old
+    case-sensitive check, got pushed with the real domain, and 404'd against Drata's sandbox.
+    Confirmed 2026-08-18 via a real prod sandbox run (personnelId=email:WADEI1@Nationwide.com)."""
+    records = [{'personnelId': 'email:WADEI1@Nationwide.com'}]
+    result = transform.apply_sandbox_overrides(records)
+    assert result[0]['personnelId'] == 'email:WADEI1@sandbox.nationwide.com'
+
+
+def test_apply_sandbox_overrides_rewrites_mixed_case_domain():
+    records = [{'personnelId': 'email:user@NationWide.Com'}]
+    result = transform.apply_sandbox_overrides(records)
+    assert result[0]['personnelId'] == 'email:user@sandbox.nationwide.com'
+
+
+def test_apply_sandbox_overrides_leaves_non_nationwide_domain_untouched():
+    records = [{'personnelId': 'email:user@example.com'}]
+    result = transform.apply_sandbox_overrides(records)
+    assert result[0]['personnelId'] == 'email:user@example.com'
+
+
+def test_apply_sandbox_overrides_leaves_non_string_personnel_id_untouched():
+    records = [{'personnelId': None}, {'personnelId': 12345}]
+    result = transform.apply_sandbox_overrides(records)
+    assert result[0]['personnelId'] is None
+    assert result[1]['personnelId'] == 12345
