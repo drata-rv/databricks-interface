@@ -478,13 +478,24 @@ _TEST_PASSING_FIELDS: Dict[str, Any] = {
 }
 
 
+_NATIONWIDE_DOMAIN_RE = re.compile(r'@nationwide\.com', re.IGNORECASE)
+
+
 def apply_sandbox_overrides(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Replace @nationwide.com with @sandbox.nationwide.com in personnelId for sandbox testing."""
+    """Replace @nationwide.com (any case) with @sandbox.nationwide.com in personnelId for sandbox testing.
+
+    Case-insensitive match: personnelId here is the original-case email (unlike the
+    personnel pre-check in extract_devices.py, which lowercases before comparing) --
+    a real @Nationwide.com (capital N) record was left unrewritten by the old
+    case-sensitive check, got pushed with the real domain, and 404'd against Drata's
+    sandbox, which only has @sandbox.nationwide.com accounts. Confirmed 2026-08-18 via
+    a real prod sandbox run (personnelId=email:WADEI1@Nationwide.com).
+    """
     result = []
     for r in records:
         pid = r.get('personnelId')
-        if isinstance(pid, str) and '@nationwide.com' in pid:
-            r = {**r, 'personnelId': pid.replace('@nationwide.com', '@sandbox.nationwide.com')}
+        if isinstance(pid, str) and _NATIONWIDE_DOMAIN_RE.search(pid):
+            r = {**r, 'personnelId': _NATIONWIDE_DOMAIN_RE.sub('@sandbox.nationwide.com', pid)}
         result.append(r)
     return result
 
