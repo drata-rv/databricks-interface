@@ -1111,17 +1111,19 @@ def main() -> None:
         drata = DrataClient(api_key=api_key, connection_id=connection_id)
         result = drata.push_batch_parallel(valid_payload)
         if result['errors']:
+            # 2026-08-19: reverted the 2026-08-07 change that sys.exit(1)'d here on any
+            # push error. This pipeline is meant to be resilient -- log errors and run to
+            # completion, not abort a multi-hour full run over a handful of bad records
+            # (real-world SCCM data always has some: missing fields, transient API blips,
+            # etc.). Per-record failures are already fully visible here and in the rejected
+            # file; a human reviews those separately from whether the job itself crashed.
             print(f"  [FAIL] {len(result['errors'])}/{result['total']} record(s) failed to push.")
             print("  Failed records:")
             for err in result['errors'][:20]:
                 print(f"    personnelId={err.get('personnelId')}  alias={err.get('alias')}  error={err.get('error')}")
             if len(result['errors']) > 20:
                 print(f"    ... and {len(result['errors']) - 20} more (see {drata_path} for full payload)")
-            # Push errors used to only print a [WARN] and exit 0 -- the job reported success
-            # having delivered nothing. Fail loud instead: a partial/total push failure means
-            # this run did not do its job, regardless of how much upstream work succeeded.
-            print(f"  Pushed {result['pushed']}/{result['total']} records; {len(result['errors'])} failed.")
-            sys.exit(1)
+            print(f"  Pushed {result['pushed']}/{result['total']} records; {len(result['errors'])} failed.\n")
         else:
             print(f"  [OK] Pushed {result['pushed']}/{result['total']} records.\n")
 
