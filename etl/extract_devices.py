@@ -803,7 +803,17 @@ def main() -> None:
         if not users_table:
             print("  [FAIL] DATABRICKS_TABLE_USERS is required but not set (or use --local-users)")
             sys.exit(1)
-        all_users = pull_table(prod_client, users_table, args.warehouse_prod, "users", timeout=args.timeout)
+        # t_sccm_r_user is the same kind of raw, periodically re-ingested landing table as
+        # devices and the six secondary tables -- confirmed 2026-08-22 via a real count:
+        # 2,362,751 rows for only 41,354 distinct user_name0 (~57 rows/user), the identical
+        # ~50-57x duplication ratio already fixed everywhere else in this pipeline. This pull
+        # never had a dedup filter applied. Restricting to the single latest (__date, __hour)
+        # batch brings it back to one row per user, same fix as devices/TABLE_REGISTRY.
+        users_filter = "1=1" + _latest_batch_clause(users_table)
+        all_users = pull_table(
+            prod_client, users_table, args.warehouse_prod, "users",
+            filter_sql=users_filter, timeout=args.timeout,
+        )
 
     if args.full:
         print(f"  Full sync: processing all {len(all_users)} users.")
