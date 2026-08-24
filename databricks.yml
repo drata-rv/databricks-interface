@@ -102,8 +102,23 @@ variables:
     description: Fully qualified prod device table (DATABRICKS_TABLE_DEVICES).
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_r_system"
   users_table:
-    description: Fully qualified user identity table (DATABRICKS_TABLE_USERS).
+    description: >
+      SCCM employee/username bridge table (DATABRICKS_TABLE_USERS). Not the personnel
+      anchor itself since 2026-08-24 -- t_sccm_r_user's own identity fields were dropped
+      in favor of iamdb_table (Nationwide's authoritative IAM source). This table is used
+      only to bridge iamdb's employeenumber to the user_name0/windows_nt_domain0 a device
+      actually carries, since devices have no employee_number of their own.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_r_user"
+  iamdb_table:
+    description: >
+      Nationwide's authoritative IAM/HR identity table (DATABRICKS_TABLE_IAMDB) -- the
+      personnel anchor. employeetype='E'/employeestatus='A' confirmed 2026-08-24 against
+      Nationwide's own 21,337 current-active-personnel figure (matched within 1.5%; other
+      employeetype codes are contractors/non-employees/service accounts). Joined to
+      users_table via employee_number to find whichever active personnel have an SCCM
+      device to report on. Replaces both t_sccm_r_user as the personnel source and the
+      old per-user Drata personnel-status API check (this filter now runs in SQL instead).
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_iamdb_userdata"
   table_windows_update:
     description: >
       Windows Update secondary table (DATABRICKS_TABLE_WINDOWS_UPDATE). Confirmed
@@ -195,6 +210,8 @@ resources:
           default: "${var.devices_table}"
         - name: users_table
           default: "${var.users_table}"
+        - name: iamdb_table
+          default: "${var.iamdb_table}"
         - name: table_windows_update
           default: "${var.table_windows_update}"
         - name: table_installed_software
@@ -251,6 +268,8 @@ resources:
               - "DATABRICKS_TABLE_DEVICES={{job.parameters.devices_table}}"
               - "--env"
               - "DATABRICKS_TABLE_USERS={{job.parameters.users_table}}"
+              - "--env"
+              - "DATABRICKS_TABLE_IAMDB={{job.parameters.iamdb_table}}"
               - "--env"
               - "DATABRICKS_TABLE_WINDOWS_UPDATE={{job.parameters.table_windows_update}}"
               - "--env"

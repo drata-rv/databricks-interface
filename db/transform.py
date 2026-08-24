@@ -213,14 +213,16 @@ def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
 
     Drata requires the format 'email:<emailAddress>' for email-based personnelId values.
 
-    Column name note: xlsx source has a typo ('User_Princiipal_Name0', double-i).
-    Databricks t_sccm_r_user uses snake_case ('user_principal_name0').
-    All three variants are tried in order.
+    'mail' (2026-08-24): iamdb-sourced, the Databricks path's normal case -- t_iamdb_userdata
+    is Nationwide's authoritative identity source, not a copy of it. The remaining fallbacks
+    are for --local-users (xlsx has a typo'd 'User_Princiipal_Name0', double-i) and for any
+    record that predates the iamdb join.
     """
     value = (
-        user.get('User_Princiipal_Name0')   # xlsx: double-i typo in source column
+        user.get('mail')                    # Databricks path: iamdb (authoritative)
+        or user.get('User_Princiipal_Name0')   # xlsx: double-i typo in source column
         or user.get('User_Principal_Name0') # xlsx: correct spelling fallback
-        or user.get('user_principal_name0') # Databricks t_sccm_r_user (snake_case)
+        or user.get('user_principal_name0') # legacy fallback (pre-iamdb-join Databricks pull)
         or None
         # Unique_User_Name0 is domain\username (e.g. NATIONWIDE\BONKB6) -- not a valid
         # Drata personnelId format, so we don't use it here.

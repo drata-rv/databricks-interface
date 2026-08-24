@@ -147,3 +147,29 @@ def test_apply_sandbox_overrides_leaves_non_string_personnel_id_untouched():
     result = transform.apply_sandbox_overrides(records)
     assert result[0]['personnelId'] is None
     assert result[1]['personnelId'] == 12345
+
+
+def test_resolve_personnel_id_prefers_iamdb_mail():
+    """2026-08-24: mail (iamdb, authoritative) must win over any SCCM/xlsx field when both
+    are present -- iamdb is Nationwide's real identity source, not a copy of it."""
+    user = {
+        'mail': 'jdoe@nationwide.com',
+        'user_principal_name0': 'stale-sccm-copy@nationwide.com',
+    }
+    assert transform._resolve_personnel_id(user) == 'email:jdoe@nationwide.com'
+
+
+def test_resolve_personnel_id_falls_back_to_xlsx_fields_without_mail():
+    user = {'User_Princiipal_Name0': 'jdoe@nationwide.com'}
+    assert transform._resolve_personnel_id(user) == 'email:jdoe@nationwide.com'
+
+    user = {'User_Principal_Name0': 'jdoe@nationwide.com'}
+    assert transform._resolve_personnel_id(user) == 'email:jdoe@nationwide.com'
+
+    user = {'user_principal_name0': 'jdoe@nationwide.com'}
+    assert transform._resolve_personnel_id(user) == 'email:jdoe@nationwide.com'
+
+
+def test_resolve_personnel_id_none_when_no_valid_email_anywhere():
+    assert transform._resolve_personnel_id({}) is None
+    assert transform._resolve_personnel_id({'mail': 'not-an-email'}) is None

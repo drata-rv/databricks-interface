@@ -120,7 +120,6 @@ _MAX_RETRIES = 3
 DEVICE_NAME_PREFIXES = ('NW', 'GI')
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
 _SW_BATCH_SIZE = 200
-_PERSONNEL_CHECK_WORKERS = 5
 _PIPELINE_CHUNK_SIZE = 500
 
 # All six secondary tables confirmed (2026-08-14, direct counts against si_prod_catalog) to
@@ -147,6 +146,51 @@ def _latest_batch_clause(table_path: str) -> str:
         f" AND __hour = (SELECT MAX(__hour) FROM {table_path}"
         f" WHERE __date = (SELECT MAX(__date) FROM {table_path}))"
     )
+
+
+def _iamdb_personnel_statement(table: str) -> str:
+    """Latest-batch, one-row-per-employeenumber pull of active personnel.
+
+    employeetype='E'/employeestatus='A' confirmed 2026-08-24 against Nationwide's own
+    21,337 current-active-personnel figure (matched within 1.5%; other employeetype codes
+    are contractors/non-employees/service accounts, not personnel this connection covers).
+    iamdb is not one-row-per-person even within a single batch -- GROUP BY collapses
+    duplicate same-batch rows per employeenumber; MAX is an arbitrary but deterministic
+    tiebreaker when a person's rows disagree, the same approach validated in the audit
+    that confirmed this table/filter.
+    """
+    return f"""
+        SELECT employeenumber, MAX(mail) AS mail, MAX(cn) AS cn
+        FROM {table}
+        WHERE __date = (SELECT MAX(__date) FROM {table})
+          AND __hour = (SELECT MAX(__hour) FROM {table}
+                         WHERE __date = (SELECT MAX(__date) FROM {table}))
+          AND employeetype = 'E' AND employeestatus = 'A'
+          AND employeenumber IS NOT NULL AND employeenumber != ''
+        GROUP BY employeenumber
+    """
+
+
+def _sccm_employee_bridge_statement(table: str) -> str:
+    """Most recent user_name0/windows_nt_domain0 per employee_number.
+
+    Bridges iamdb's authoritative personnel record to SCCM's device-login username --
+    devices only carry user_name0/user_domain0, not employee_number, so this bridge is
+    required to scope devices to the correct personnel set. ROW_NUMBER (not independent
+    MAX per column) keeps user_name0 and windows_nt_domain0 paired from the same row,
+    since a person could plausibly change domain and username together (account migration).
+    """
+    return f"""
+        SELECT employee_number, user_name0, windows_nt_domain0 FROM (
+            SELECT employee_number, user_name0, windows_nt_domain0,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY employee_number
+                       ORDER BY __date DESC, __hour DESC, __row_hash DESC
+                   ) AS __rn
+            FROM {table}
+            WHERE employee_number IS NOT NULL AND employee_number != ''
+        ) WHERE __rn = 1
+    """
 
 
 def is_internal(col: str) -> bool:
@@ -259,6 +303,7 @@ def pull_table(
     filter_sql: Optional[str] = None,
     timeout: int = 300,
     required: bool = True,
+    statement: Optional[str] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Pull a table and return cleaned records.
 
@@ -266,13 +311,17 @@ def pull_table(
     tables the pipeline cannot proceed without (users, devices, windows_update, ...).
     required=False: logs a warning and returns None instead of exiting, so a transient
     failure on a best-effort table (e.g. antivirus_product) cannot abort a multi-hour run.
+    statement: full SQL body to run verbatim instead of building SELECT * FROM table
+    [WHERE filter_sql] [LIMIT limit] -- for pulls needing aggregation/window-function
+    dedup beyond a simple WHERE filter (e.g. iamdb's latest-batch, one-row-per-person pull).
     """
-    parts = [f"SELECT * FROM {table}"]
-    if filter_sql:
-        parts.append(f"WHERE {filter_sql}")
-    if limit is not None:
-        parts.append(f"LIMIT {limit}")
-    statement = " ".join(parts)
+    if statement is None:
+        parts = [f"SELECT * FROM {table}"]
+        if filter_sql:
+            parts.append(f"WHERE {filter_sql}")
+        if limit is not None:
+            parts.append(f"LIMIT {limit}")
+        statement = " ".join(parts)
     print(f"  Pulling {label} ({table}) ...")
     last_error: Optional[Exception] = None
     for attempt in range(1, _MAX_RETRIES + 1):
@@ -641,8 +690,9 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help=(
             f"Load the users table from the local xlsx file ({_LOCAL_USERS_FILE}) "
-            "instead of pulling from Databricks. Bypasses DATABRICKS_TABLE_USERS. "
-            "Records are scoped to the machine names returned by the devices pull."
+            "instead of pulling from Databricks. Bypasses DATABRICKS_TABLE_USERS and "
+            "DATABRICKS_TABLE_IAMDB. Records are scoped to the machine names returned by "
+            "the devices pull."
         ),
     )
     # test-mode/sandbox/dry-run/full accept an optional explicit value (nargs='?') rather than
@@ -772,6 +822,7 @@ def main() -> None:
         print(f"DATABRICKS_WAREHOUSE_ID_TEST     : {os.getenv('DATABRICKS_WAREHOUSE_ID_TEST', '(not set)')}")
         print(f"DATABRICKS_TABLE_DEVICES         : {os.getenv('DATABRICKS_TABLE_DEVICES', '(not set)')}")
         print(f"DATABRICKS_TABLE_USERS           : {os.getenv('DATABRICKS_TABLE_USERS', '(not set)')}")
+        print(f"DATABRICKS_TABLE_IAMDB           : {os.getenv('DATABRICKS_TABLE_IAMDB', '(not set)')}")
         for spec in TABLE_REGISTRY:
             val = os.getenv(spec.env_var, '(not set)')
             req = 'required' if spec.required else 'optional'
@@ -799,21 +850,47 @@ def main() -> None:
         all_users = load_users_from_xlsx(_LOCAL_USERS_FILE, netbios_filter=None)
         print(f"  {len(all_users)} users loaded.")
     else:
-        users_table = os.getenv("DATABRICKS_TABLE_USERS", "").strip()
-        if not users_table:
-            print("  [FAIL] DATABRICKS_TABLE_USERS is required but not set (or use --local-users)")
+        iamdb_table = os.getenv("DATABRICKS_TABLE_IAMDB", "").strip()
+        sccm_users_table = os.getenv("DATABRICKS_TABLE_USERS", "").strip()
+        if not iamdb_table or not sccm_users_table:
+            print("  [FAIL] DATABRICKS_TABLE_IAMDB and DATABRICKS_TABLE_USERS are both required (or use --local-users)")
             sys.exit(1)
-        # t_sccm_r_user is the same kind of raw, periodically re-ingested landing table as
-        # devices and the six secondary tables -- confirmed 2026-08-22 via a real count:
-        # 2,362,751 rows for only 41,354 distinct user_name0 (~57 rows/user), the identical
-        # ~50-57x duplication ratio already fixed everywhere else in this pipeline. This pull
-        # never had a dedup filter applied. Restricting to the single latest (__date, __hour)
-        # batch brings it back to one row per user, same fix as devices/TABLE_REGISTRY.
-        users_filter = "1=1" + _latest_batch_clause(users_table)
-        all_users = pull_table(
-            prod_client, users_table, args.warehouse_prod, "users",
-            filter_sql=users_filter, timeout=args.timeout,
+
+        # 2026-08-24: personnel anchor switched from t_sccm_r_user's own identity fields to
+        # t_iamdb_userdata (Nationwide's authoritative IAM source), joined to SCCM via
+        # employee_number for whichever active personnel actually have a device to report on.
+        # This replaces the old per-user Drata personnel-status API check (up to ~41K live
+        # calls/run) with a fast, local, authoritative filter -- and fixes personnelId being
+        # sourced from SCCM's own copy of the user's email, which is what caused the
+        # @Nationwide.com casing bug (iamdb's mail is the authoritative value, not a copy).
+        personnel = pull_table(
+            prod_client, iamdb_table, args.warehouse_prod, "iamdb personnel",
+            statement=_iamdb_personnel_statement(iamdb_table), timeout=args.timeout,
         )
+        print(f"  {len(personnel)} active personnel (employeetype=E, employeestatus=A).")
+
+        bridge = pull_table(
+            prod_client, sccm_users_table, args.warehouse_prod, "sccm employee bridge",
+            statement=_sccm_employee_bridge_statement(sccm_users_table), timeout=args.timeout,
+        )
+        bridge_by_empnum = {b['employee_number']: b for b in bridge}
+        print(f"  {len(bridge_by_empnum)} distinct employee_number(s) with an SCCM device-login record.")
+
+        all_users = []
+        no_device_record = 0
+        for p in personnel:
+            b = bridge_by_empnum.get(p['employeenumber'])
+            if b is None:
+                no_device_record += 1
+                continue
+            all_users.append({
+                'user_name0': b['user_name0'],
+                'windows_nt_domain0': b['windows_nt_domain0'],
+                'mail': p['mail'],
+                'employeenumber': p['employeenumber'],
+            })
+        print(f"  {len(all_users)} active personnel matched to an SCCM device-login record "
+              f"({no_device_record} active personnel have no SCCM device record -- no device to report on).")
 
     if args.full:
         print(f"  Full sync: processing all {len(all_users)} users.")
@@ -821,53 +898,8 @@ def main() -> None:
         print(f"  Limiting to {args.limit} users (of {len(all_users)} total).")
         all_users = all_users[:args.limit]
 
-    # Step 1b: validate each user against Drata personnel status (parallel)
-    if api_key:
-        from db.drata_client import DrataClient
-        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-        drata_pre = DrataClient(api_key=api_key, connection_id=connection_id)
-        _active = {'CURRENT_EMPLOYEE', 'CURRENT_CONTRACTOR'}
-        before = len(all_users)
-        sandbox_flag = args.sandbox
-
-        def _check_one(u):
-            try:
-                email = (
-                    u.get('User_Princiipal_Name0')   # xlsx: double-i typo
-                    or u.get('User_Principal_Name0') # xlsx: correct spelling
-                    or u.get('user_principal_name0') # Databricks t_sccm_r_user
-                    or ''
-                ).lower()
-                if not email or '@' not in email:
-                    return u, None
-                lookup = email
-                if sandbox_flag and '@nationwide.com' in email:
-                    lookup = email.replace('@nationwide.com', '@sandbox.nationwide.com')
-                return u, drata_pre.get_person_status(lookup)
-            except Exception:
-                return u, '__error__'
-
-        filtered = []
-        check_errors = 0
-        print(f"Checking {before} user(s) against Drata personnel status ({_PERSONNEL_CHECK_WORKERS} workers) ...")
-        with ThreadPoolExecutor(max_workers=_PERSONNEL_CHECK_WORKERS) as pool:
-            futures = {pool.submit(_check_one, u): u for u in all_users}
-            for i, fut in enumerate(_as_completed(futures), 1):
-                u, status = fut.result()
-                if status == '__error__':
-                    check_errors += 1
-                elif status in _active:
-                    filtered.append(u)
-                if i % 500 == 0:
-                    print(f"  ... {i}/{before} checked, {len(filtered)} active ...")
-        all_users = filtered
-        skipped = before - len(all_users) - check_errors
-        print(f"  Personnel filter: {len(all_users)} active / {skipped} excluded (former/not found) / {check_errors} API errors (excluded).")
-    else:
-        print("  [WARN] DRATA_API_KEY not set -- personnel filter skipped, all users will be processed.")
-
     if not all_users:
-        print("  [FAIL] No users remain after personnel filter -- check DRATA_API_KEY or user data")
+        print("  [FAIL] No users remain -- check DATABRICKS_TABLE_IAMDB/DATABRICKS_TABLE_USERS or user data")
         sys.exit(1)
 
     # Steps 2-5: process in chunks to bound memory and Databricks query scope
