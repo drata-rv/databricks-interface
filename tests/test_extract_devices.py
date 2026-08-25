@@ -11,6 +11,7 @@ from etl.extract_devices import (
     _latest_batch_clause,
     _iamdb_personnel_statement,
     _sccm_employee_bridge_statement,
+    _drata_secret_names,
     pull_table,
 )
 
@@ -131,3 +132,19 @@ def test_pull_table_without_statement_still_builds_select_star():
         )
     actual_statement = run_sql.call_args.kwargs["statement"]
     assert actual_statement == "SELECT * FROM t_sccm_r_system WHERE resource_id IN (1, 2) LIMIT 5"
+
+
+def test_drata_secret_names_sandbox_keeps_existing_names():
+    """Must not change -- nothing in Databricks should need to change for sandbox runs to
+    keep working exactly as they always have."""
+    assert _drata_secret_names(True) == ("drata-api-key", "drata-connection-id", "drata-host")
+
+
+def test_drata_secret_names_prod_uses_new_distinct_names_with_no_sandbox_overlap():
+    """Must be entirely new names, not a rename or reuse of the sandbox ones -- a real
+    production push requires these to be deliberately added to the secret scope, with no
+    fallback to sandbox credentials."""
+    prod_names = _drata_secret_names(False)
+    sandbox_names = _drata_secret_names(True)
+    assert prod_names == ("drata-api-key-prod", "drata-connection-id-prod", "drata-host-prod")
+    assert set(prod_names).isdisjoint(set(sandbox_names))

@@ -4,12 +4,13 @@ Drata Custom Device Connection API client.
 Pushes device records to Drata one at a time via the Custom Device Connection endpoint.
 Retries transient errors and collects per-record failures without aborting the entire push.
 
-Required env vars:
-  DRATA_API_KEY       -- Bearer token for the Drata public API
-  DRATA_CONNECTION_ID -- ID of the Custom Device Connection in Drata
+base_url defaults to Drata's standard public API host but is caller-overridable (2026-08-24)
+-- the sandbox vs prod Nationwide Drata tenant distinction is driven by which credentials
+(and, if ever needed, which host) the caller resolves and passes in, not by anything in
+this class. See etl/extract_devices.py's _drata_secret_names() for that selection.
 
 Endpoint:
-  POST https://public-api.drata.com/public/v2/custom-connections/{connectionId}/devices
+  POST {base_url}/public/v2/custom-connections/{connectionId}/devices
   One device object per request.
 """
 
@@ -22,17 +23,18 @@ _MAX_RATE_LIMIT_RETRIES = 8  # separate, more generous budget -- see _push_one_r
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
 _PUSH_WORKERS = 10
 
-_BASE_URL = "https://public-api.drata.com"
+_DEFAULT_BASE_URL = "https://public-api.drata.com"
 _PUSH_PATH = "/public/v2/custom-connections/{connection_id}/devices"
 
 
 class DrataClient:
     """Push Drata Custom Device Connection records via the Drata public API."""
 
-    def __init__(self, api_key: str, connection_id: str, timeout: int = 30) -> None:
+    def __init__(self, api_key: str, connection_id: str, timeout: int = 30, base_url: str = None) -> None:
         self._api_key = api_key
         self._connection_id = connection_id
         self._timeout = timeout
+        self._base_url = base_url or _DEFAULT_BASE_URL
         self._local = threading.local()
 
     @property
@@ -59,7 +61,7 @@ class DrataClient:
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        url = f"{_BASE_URL}{_PUSH_PATH.format(connection_id=self._connection_id)}"
+        url = f"{self._base_url}{_PUSH_PATH.format(connection_id=self._connection_id)}"
         errors: List[Dict[str, Any]] = []
         lock = threading.Lock()
         pushed_count = 0
@@ -172,7 +174,7 @@ class DrataClient:
         import requests
         from urllib.parse import quote
         encoded = quote(email, safe='')
-        url = f"{_BASE_URL}/public/v2/personnel/email:{encoded}"
+        url = f"{self._base_url}/public/v2/personnel/email:{encoded}"
         last_err: Exception = Exception(f"no attempts made for {email}")
         for attempt in range(1, _MAX_RETRIES + 1):
             try:

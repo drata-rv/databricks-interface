@@ -30,9 +30,11 @@ class _FakeSession:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = 0
+        self.last_url = None
 
     def post(self, url, json=None, timeout=None):
         self.calls += 1
+        self.last_url = url
         return self._responses[min(self.calls - 1, len(self._responses) - 1)]
 
     def get(self, url, timeout=None):
@@ -44,10 +46,15 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(dc.time, 'sleep', lambda seconds: None)
 
 
-def _client_with_responses(responses):
-    client = dc.DrataClient(api_key='k', connection_id='c')
-    client._local.session = _FakeSession(responses)
-    return client, client._local.session
+def _client_with_responses(responses, base_url=None):
+    """push_batch_parallel runs each record on its own worker thread, and _session is
+    threading.local() -- setting client._local.session only reaches the main thread. Override
+    _build_session itself (instance attribute shadows the class method) so every thread that
+    lazily builds its own session gets the SAME fake object instead of a real requests.Session."""
+    client = dc.DrataClient(api_key='k', connection_id='c', base_url=base_url)
+    fake_session = _FakeSession(responses)
+    client._build_session = lambda: fake_session
+    return client, fake_session
 
 
 def test_push_one_record_succeeds_first_try():
@@ -127,3 +134,32 @@ def test_get_person_status_429_with_non_numeric_retry_after_falls_back():
     ]
     client, _ = _client_with_responses(responses)
     assert client.get_person_status('user@example.com') == 'CURRENT_EMPLOYEE'
+
+
+def test_default_base_url_used_when_none_passed():
+    """No caller passes base_url= today except the sandbox/prod tenant selection --
+    everything else must keep hitting Drata's real API host unchanged."""
+    client, session = _client_with_responses([_FakeResponse(200, json_data={'employmentStatus': 'CURRENT_EMPLOYEE'})])
+    client.get_person_status('user@example.com')
+    assert session.last_url.startswith(dc._DEFAULT_BASE_URL)
+
+
+def test_custom_base_url_used_for_person_status_lookup():
+    client, session = _client_with_responses(
+        [_FakeResponse(200, json_data={'employmentStatus': 'CURRENT_EMPLOYEE'})],
+        base_url='https://prod.example.drata.com',
+    )
+    client.get_person_status('user@example.com')
+    assert session.last_url.startswith('https://prod.example.drata.com')
+    assert dc._DEFAULT_BASE_URL not in session.last_url
+
+
+def test_custom_base_url_used_for_push():
+    """base_url is only consumed in push_batch_parallel's URL construction --
+    _push_one_record takes a pre-built url as a plain argument, so the base_url must be
+    exercised through the real entry point, not by calling _push_one_record directly."""
+    client, session = _client_with_responses([_FakeResponse(200)], base_url='https://prod.example.drata.com')
+    result = client.push_batch_parallel([{'personnelId': 'p'}])
+    assert result['pushed'] == 1
+    assert session.last_url.startswith('https://prod.example.drata.com')
+    assert dc._DEFAULT_BASE_URL not in session.last_url

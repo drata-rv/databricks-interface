@@ -120,6 +120,7 @@ _MAX_RETRIES = 3
 DEVICE_NAME_PREFIXES = ('NW', 'GI')
 _RETRY_DELAYS = (5, 15)  # seconds before attempt 2 and attempt 3
 _SW_BATCH_SIZE = 200
+_PERSONNEL_CHECK_WORKERS = 5
 _PIPELINE_CHUNK_SIZE = 500
 
 # All six secondary tables confirmed (2026-08-14, direct counts against si_prod_catalog) to
@@ -191,6 +192,24 @@ def _sccm_employee_bridge_statement(table: str) -> str:
             WHERE employee_number IS NOT NULL AND employee_number != ''
         ) WHERE __rn = 1
     """
+
+
+def _drata_secret_names(sandbox: bool) -> Tuple[str, str, str]:
+    """Returns (api_key_secret, connection_id_secret, host_secret) for the given sandbox flag.
+
+    sandbox=True keeps the original, pre-existing secret names unchanged -- nothing in
+    Databricks needs to change for a sandbox run to keep working exactly as it always has.
+    sandbox=False uses new, deliberately distinct '-prod' names that must be added to the
+    secret scope before a real production push is possible -- there is no fallback to the
+    sandbox credentials; get_secret() raises loudly on Databricks if a key is missing, which
+    is the correct failure mode here (never silently reuse sandbox credentials for a prod run).
+    host_secret is optional in both cases -- get_secret() returning empty means DrataClient
+    falls back to its own default base URL, since sandbox and prod are not known to need
+    different hosts today, only different credentials.
+    """
+    if sandbox:
+        return "drata-api-key", "drata-connection-id", "drata-host"
+    return "drata-api-key-prod", "drata-connection-id-prod", "drata-host-prod"
 
 
 def is_internal(col: str) -> bool:
@@ -828,8 +847,10 @@ def main() -> None:
             req = 'required' if spec.required else 'optional'
             print(f"{spec.env_var:<40}: {val}  [{req}]")
         print(f"DATABRICKS_QUERY_TIMEOUT         : {os.getenv('DATABRICKS_QUERY_TIMEOUT', '(not set, using 300)')}")
-        print(f"DRATA_API_KEY                    : {'(set)' if os.getenv('DRATA_API_KEY') else '(not set)'}")
-        print(f"DRATA_CONNECTION_ID              : {os.getenv('DRATA_CONNECTION_ID', '(not set)')}")
+        _dbg_api_key_secret, _dbg_conn_id_secret, _dbg_host_secret = _drata_secret_names(args.sandbox)
+        print(f"Drata tenant (sandbox={args.sandbox}) secrets: {_dbg_api_key_secret}, {_dbg_conn_id_secret}, {_dbg_host_secret}")
+        print(f"{_dbg_api_key_secret.upper().replace('-', '_'):<34}: {'(set)' if os.getenv(_dbg_api_key_secret.upper().replace('-', '_')) else '(not set)'}")
+        print(f"{_dbg_conn_id_secret.upper().replace('-', '_'):<34}: {os.getenv(_dbg_conn_id_secret.upper().replace('-', '_'), '(not set)')}")
         print(f"~/.databrickscfg exists          : {databrickscfg.exists()}")
         if args.local_users:
             xlsx_exists = Path(_LOCAL_USERS_FILE).exists()
@@ -838,8 +859,14 @@ def main() -> None:
     else:
         print()
 
-    api_key = (get_secret("drata-api-key", env_var="DRATA_API_KEY") or "").strip()
-    connection_id = (get_secret("drata-connection-id", env_var="DRATA_CONNECTION_ID") or "").strip()
+    # 2026-08-24: which Drata tenant we talk to (sandbox vs prod) is selected here, purely
+    # by which secret names get resolved -- see _drata_secret_names(). Nothing else in this
+    # file needs to know which tenant is active; api_key/connection_id/drata_host are used
+    # identically either way, for both the personnel-status check below and the final push.
+    api_key_secret, connection_id_secret, host_secret = _drata_secret_names(args.sandbox)
+    api_key = (get_secret(api_key_secret) or "").strip()
+    connection_id = (get_secret(connection_id_secret) or "").strip()
+    drata_host = (get_secret(host_secret) or "").strip() or None
 
     # Step 1: load users first (anchor for all downstream scope)
     if args.local_users:
@@ -859,10 +886,12 @@ def main() -> None:
         # 2026-08-24: personnel anchor switched from t_sccm_r_user's own identity fields to
         # t_iamdb_userdata (Nationwide's authoritative IAM source), joined to SCCM via
         # employee_number for whichever active personnel actually have a device to report on.
-        # This replaces the old per-user Drata personnel-status API check (up to ~41K live
-        # calls/run) with a fast, local, authoritative filter -- and fixes personnelId being
-        # sourced from SCCM's own copy of the user's email, which is what caused the
-        # @Nationwide.com casing bug (iamdb's mail is the authoritative value, not a copy).
+        # This fixes personnelId being sourced from SCCM's own copy of the user's email,
+        # which is what caused the @Nationwide.com casing bug (iamdb's mail is the
+        # authoritative value, not a copy). The Drata personnel-status check below is
+        # unrelated and still runs -- iamdb answers "is this person active per Nationwide's
+        # HR system," Drata's own check answers "does Drata itself recognize this person,"
+        # a different question that can disagree with iamdb.
         personnel = pull_table(
             prod_client, iamdb_table, args.warehouse_prod, "iamdb personnel",
             statement=_iamdb_personnel_statement(iamdb_table), timeout=args.timeout,
@@ -898,8 +927,58 @@ def main() -> None:
         print(f"  Limiting to {args.limit} users (of {len(all_users)} total).")
         all_users = all_users[:args.limit]
 
+    # Step 1b: verify each candidate against Drata's own personnel record. Restored
+    # 2026-08-24 -- Drata is the actual system of record for whether a pushed device can
+    # correctly link to a real personnel entry there; iamdb's employeestatus is Nationwide's
+    # HR truth, a different question that can disagree with Drata's own roster (confirmed:
+    # Drata's Personnel view reports a different total than iamdb's active-employee count).
+    if api_key:
+        from db.drata_client import DrataClient
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        drata_pre = DrataClient(api_key=api_key, connection_id=connection_id, base_url=drata_host)
+        _active = {'CURRENT_EMPLOYEE', 'CURRENT_CONTRACTOR'}
+        before = len(all_users)
+        sandbox_flag = args.sandbox
+
+        def _check_one(u):
+            try:
+                email = (
+                    u.get('mail')                    # Databricks path: iamdb (authoritative)
+                    or u.get('User_Princiipal_Name0')   # xlsx: double-i typo
+                    or u.get('User_Principal_Name0') # xlsx: correct spelling
+                    or u.get('user_principal_name0') # legacy fallback
+                    or ''
+                ).lower()
+                if not email or '@' not in email:
+                    return u, None
+                lookup = email
+                if sandbox_flag and '@nationwide.com' in email:
+                    lookup = email.replace('@nationwide.com', '@sandbox.nationwide.com')
+                return u, drata_pre.get_person_status(lookup)
+            except Exception:
+                return u, '__error__'
+
+        filtered = []
+        check_errors = 0
+        print(f"Checking {before} user(s) against Drata personnel status ({_PERSONNEL_CHECK_WORKERS} workers) ...")
+        with ThreadPoolExecutor(max_workers=_PERSONNEL_CHECK_WORKERS) as pool:
+            futures = {pool.submit(_check_one, u): u for u in all_users}
+            for i, fut in enumerate(_as_completed(futures), 1):
+                u, status = fut.result()
+                if status == '__error__':
+                    check_errors += 1
+                elif status in _active:
+                    filtered.append(u)
+                if i % 500 == 0:
+                    print(f"  ... {i}/{before} checked, {len(filtered)} active ...")
+        all_users = filtered
+        skipped = before - len(all_users) - check_errors
+        print(f"  Drata personnel filter: {len(all_users)} confirmed / {skipped} excluded (not found/former in Drata) / {check_errors} API errors (excluded).")
+    else:
+        print(f"  [WARN] {api_key_secret} not set -- Drata personnel verification skipped, all users will be processed.")
+
     if not all_users:
-        print("  [FAIL] No users remain -- check DATABRICKS_TABLE_IAMDB/DATABRICKS_TABLE_USERS or user data")
+        print("  [FAIL] No users remain after Drata personnel verification -- check DATABRICKS_TABLE_IAMDB/DATABRICKS_TABLE_USERS, the Drata credentials, or user data")
         sys.exit(1)
 
     # Steps 2-5: process in chunks to bound memory and Databricks query scope
@@ -1146,11 +1225,11 @@ def main() -> None:
     if args.dry_run:
         print(f"\n[DRY RUN] Would push {len(valid_payload)} records to Drata (skipped).\n")
     elif not api_key or not connection_id:
-        print("\n[SKIP] DRATA_API_KEY or DRATA_CONNECTION_ID not set -- skipping push.\n")
+        print(f"\n[SKIP] {api_key_secret} or {connection_id_secret} not set -- skipping push.\n")
     else:
         from db.drata_client import DrataClient
         print(f"\nPushing {len(valid_payload)} records to Drata (parallel) ...")
-        drata = DrataClient(api_key=api_key, connection_id=connection_id)
+        drata = DrataClient(api_key=api_key, connection_id=connection_id, base_url=drata_host)
         result = drata.push_batch_parallel(valid_payload)
         if result['errors']:
             # 2026-08-19: reverted the 2026-08-07 change that sys.exit(1)'d here on any
