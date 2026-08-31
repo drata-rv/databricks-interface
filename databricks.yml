@@ -258,11 +258,12 @@ resources:
           # gate in etl/extract_devices.py) -- a retried run re-pushes the same data,
           # it does not create duplicates.
           max_retries: 1
-          # No email_notifications block on purpose -- no real ops/on-call address exists yet.
-          # A fake placeholder here would silently fail delivery and look like alerting is
-          # configured when it isn't. Add on_failure back (with alert_on_last_attempt: true
-          # below, to avoid spamming once per retry) once Terry/Nationwide provides a real
-          # distribution list.
+          # 2026-08-31: real distribution list provided (ITComplianceSupport@nationwide.com) --
+          # on_failure only; alert_on_last_attempt below collapses retries into one alert
+          # instead of spamming once per attempt.
+          email_notifications:
+            on_failure:
+              - "ITComplianceSupport@nationwide.com"
           webhook_notifications: {}
           notification_settings:
             alert_on_last_attempt: true
