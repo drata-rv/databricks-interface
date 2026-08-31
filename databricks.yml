@@ -1,35 +1,18 @@
 # Databricks Asset Bundle for the SCCM -> Drata device compliance sync.
 #
-# This job does NO Spark distribution -- all data movement is via the SQL Statement
-# Execution REST API (db/queries.py) and the Drata push is driver-side ThreadPoolExecutor
-# I/O (db/drata_client.py). Compute is deliberately serverless/single-node; do not convert
-# this to a multi-node job cluster, it would just be idle cost.
+# No Spark distribution -- data movement is via the SQL Statement Execution REST API
+# (db/queries.py); the Drata push is driver-side ThreadPoolExecutor I/O (db/drata_client.py).
+# Compute is deliberately serverless/single-node -- do not convert to a multi-node cluster.
 #
-# `databricks bundle validate` has NOT been run against this file -- the Databricks CLI is
-# not available in the environment this was authored in. Run it on a machine with the CLI
-# installed before deploying, and expect to fix minor schema issues on the first pass.
+# Serverless python_wheel_task has no environment-variable injection mechanism. Instead,
+# extract_devices.py takes a repeatable `--env KEY=VALUE` CLI flag applied to os.environ
+# before anything else reads a DATABRICKS_* var (see _apply_cli_env_overrides()). Every
+# table/warehouse/secret-scope variable below is passed through that flag.
 #
-# RESOLVED (2026-08-04): serverless python_wheel_task has NO environment-variable injection
-# mechanism at any level -- confirmed against Databricks' Jobs API docs and the serverless
-# compute limitations page, which states outright: "Environment variables. Instead, Databricks
-# recommends using widgets to create job and task parameters." spark_env_vars only exists on a
-# classic new_cluster spec, which serverless (environment_key/environments.spec) doesn't have.
-# So the fix is NOT an env key on environments.spec -- there isn't one. Instead, extract_devices.py
-# now takes a repeatable `--env KEY=VALUE` CLI flag (applied to os.environ before anything else
-# reads a DATABRICKS_* var, including argparse's own defaults) -- see
-# etl/extract_devices.py::_apply_cli_env_overrides(). Every table/warehouse/secret-scope
-# variable below is passed through that flag in the task's `parameters` list.
-#
-# Two placeholders below still block real execution (not deploy) until Nationwide sends the
-# actual values: the two per-workspace secret scope names. The job's service-principal identity
-# and the prod workspace host separately block only a `prod` target deploy. See README.md's
-# "Running on Databricks" section for who owns each.
-#
-# Auth: Nationwide's security policy prefers OAuth M2M (service principal) over a personal
-# access token -- confirmed by Terry Hardaway 2026-07-13. db/auth.py's get_client_for_env()
-# prefers OAuth when a scope holds both databricks-client-id-{prod,test} and
-# databricks-client-secret-{prod,test}, falling back to databricks-token-{prod,test} (PAT)
-# otherwise. Nationwide provisions one secret scope per workspace, not one shared scope.
+# Auth: OAuth M2M (service principal) preferred over a personal access token, per
+# Nationwide security policy. db/auth.py's get_client_for_env() prefers OAuth when a scope
+# holds databricks-client-id-{prod,test} + databricks-client-secret-{prod,test}, falling
+# back to databricks-token-{prod,test} (PAT) otherwise. One secret scope per workspace.
 
 bundle:
   name: databricks-interface
@@ -43,128 +26,86 @@ variables:
     default: "ed10729e21418123"
   secret_scope_name_prod:
     description: >
-      Confirmed 2026-08-14 -- dbx_irg_prod_comp_sp, matching the dev/test naming pattern
-      (dbx_irg_dev_comp_sp). Holds databricks-host-prod / databricks-client-id-prod /
-      databricks-client-secret-prod (or databricks-token-prod as a PAT fallback). Contents
-      not yet verified populated -- confirm with dbutils.secrets.list(scope=
-      "dbx_irg_prod_comp_sp") before relying on this for a real run.
+      Prod workspace secret scope. Holds databricks-host-prod / databricks-client-id-prod /
+      databricks-client-secret-prod (or databricks-token-prod as a PAT fallback).
     default: "dbx_irg_prod_comp_sp"
   secret_scope_name_test:
     description: >
-      Confirmed 2026-08-04 via dbutils.secrets.listScopes() run directly against the test
-      workspace (nationwide-irm-test-ohio) -- "Drata ETL" is the scope, named after this
-      integration. Holds databricks-client-id-test / databricks-client-secret-test (or
-      databricks-token-test as a PAT fallback). Contents not yet verified -- confirm the
-      expected keys actually exist (dbutils.secrets.list(scope="dbx_irg_dev_comp_sp")) before
-      relying on this for a real run; the scope existing doesn't guarantee it's populated.
+      Test workspace secret scope ("Drata ETL"). Holds databricks-client-id-test /
+      databricks-client-secret-test (or databricks-token-test as a PAT fallback).
     default: "dbx_irg_dev_comp_sp"
   secret_scope_default:
     description: >
-      Used for db/secrets.py::get_secret() calls that pass no explicit scope -- currently
-      only drata-api-key/drata-connection-id (etl/extract_devices.py). These aren't
-      per-workspace, so they don't fit secret_scope_name_prod/_test's split. Same scope as
-      secret_scope_name_test above -- Drata credentials were added there directly.
+      Scope for db/secrets.py::get_secret() calls that pass no explicit scope -- currently
+      drata-api-key/drata-connection-id (etl/extract_devices.py). Not per-workspace, so it
+      doesn't fit the prod/test split above.
     default: "dbx_irg_dev_comp_sp"
   devices_client:
     description: >
       Which workspace connection extract-devices.py uses for the devices table -- "prod"
       (real production data, default) or "test" (a devices-equivalent table in the test
-      workspace's catalog, for an end-to-end test run needing zero prod credentials).
-      Overridden to "test" in the dev target below.
+      workspace's catalog, needing zero prod credentials). Overridden to "test" in dev below.
     default: "prod"
   sandbox:
     description: >
-      Default for the "sandbox" job parameter -- "true" rewrites personnelId to
-      @sandbox.nationwide.com before pushing (see etl/extract_devices.py). Defaults "true"
-      here so a parameterless "Run now" on dev can't accidentally push real personnelIds --
-      full defaults true too (entire population, no --limit), so without this a bare run
-      would push real, non-sandboxed data for every user. 2026-08-31: prod's target below
-      NOW overrides this to "false" -- deliberate, so the nightly schedule (which triggers
-      with default parameters, unable to pass --params per run) pushes real production data
-      automatically. A manual `bundle run -t prod` with no --params override now also
-      defaults to a real push -- pass --params sandbox=true explicitly for a sandboxed test
-      run against the prod workspace instead.
+      Default for the "sandbox" job parameter. "true" rewrites personnelId to
+      @sandbox.nationwide.com before pushing (see etl/extract_devices.py); "false" pushes
+      real data. prod's target below overrides this to "false" since the nightly schedule
+      triggers with default parameters and can't pass --params per run -- pass
+      --params sandbox=true for a sandboxed test run against prod data instead.
     default: "true"
-  # 2026-08-14: switched from si_test_catalog to si_prod_catalog -- confirmed via SHOW
-  # TABLES that every table below exists under the identical name in si_prod_catalog.
-  # TABLE_REGISTRY's client_key and the users_table pull were also switched from
-  # 'test'/test_client to 'prod'/prod_client to match -- these now query si_prod_catalog
-  # using the prod SP's connection, not test's. All six secondary tables were confirmed
-  # the same day to be raw landing tables (multiple ingestion batches per resource_id) --
-  # etl/extract_devices.py applies a latest-batch-only filter to each automatically, see
-  # _RAW_LANDING_TABLES.
-  #
-  # 2026-08-18: devices_table corrected to t_sccm_r_system (was t_sccm_v_r_system_temp).
-  # Terry Hardaway (Nationwide) confirmed the "_temp" table is not the intended production
-  # source -- t_sccm_r_system is. That's the same raw multi-batch landing table test's
-  # devices source already needed a dedup filter for (see the 2026-08-07 note in
-  # etl/extract_devices.py) -- that filter is now applied unconditionally instead of
-  # gated on devices_client=="test", so prod gets the same protection.
   devices_table:
     description: Fully qualified prod device table (DATABRICKS_TABLE_DEVICES).
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_r_system"
   users_table:
     description: >
-      SCCM employee/username bridge table (DATABRICKS_TABLE_USERS). Not the personnel
-      anchor itself since 2026-08-24 -- t_sccm_r_user's own identity fields were dropped
-      in favor of iamdb_table (Nationwide's authoritative IAM source). This table is used
-      only to bridge iamdb's employeenumber to the user_name0/windows_nt_domain0 a device
-      actually carries, since devices have no employee_number of their own.
+      SCCM employee/username bridge table (DATABRICKS_TABLE_USERS) -- bridges iamdb_table's
+      employeenumber to the user_name0/windows_nt_domain0 a device carries. Not the
+      personnel anchor itself; see iamdb_table.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_r_user"
   iamdb_table:
     description: >
       Nationwide's authoritative IAM/HR identity table (DATABRICKS_TABLE_IAMDB) -- the
-      personnel anchor. employeetype='E'/employeestatus='A' confirmed 2026-08-24 against
-      Nationwide's own 21,337 current-active-personnel figure (matched within 1.5%; other
-      employeetype codes are contractors/non-employees/service accounts). Joined to
-      users_table via employee_number to find whichever active personnel have an SCCM
-      device to report on. Replaces both t_sccm_r_user as the personnel source and the
-      old per-user Drata personnel-status API check (this filter now runs in SQL instead).
+      personnel anchor. Filtered to employeetype='E' AND employeestatus='A'. Joined to
+      users_table via employee_number to find active personnel with an SCCM device.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_iamdb_userdata"
   table_windows_update:
     description: >
-      Windows Update secondary table (DATABRICKS_TABLE_WINDOWS_UPDATE). Confirmed
-      2026-08-14 to be a raw landing table (__date/__hour ingestion columns) -- code applies
-      a latest-batch-only filter automatically, see _RAW_LANDING_TABLES in
-      etl/extract_devices.py.
+      Windows Update secondary table (DATABRICKS_TABLE_WINDOWS_UPDATE) -- raw landing
+      table, latest-batch filter applied automatically (see _RAW_LANDING_TABLES).
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_windowsupdate"
   table_installed_software:
     description: >
       Installed software secondary table (DATABRICKS_TABLE_INSTALLED_SOFTWARE). Same raw
-      landing table pattern as table_windows_update -- see _RAW_LANDING_TABLES.
+      landing table pattern as table_windows_update.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_installed_software"
   table_antivirus:
     description: >
-      Antivirus product table, feeds antivirusEnabled (DATABRICKS_TABLE_ANTIVIRUS). Same raw
-      landing table pattern -- see _RAW_LANDING_TABLES.
+      Antivirus product table, feeds antivirusEnabled (DATABRICKS_TABLE_ANTIVIRUS). Same
+      raw landing table pattern.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_antivirusproduct"
   table_firewall:
     description: >
       Firewall product table, pulled but not yet wired to a Drata field
-      (DATABRICKS_TABLE_FIREWALL). Same raw landing table pattern -- see _RAW_LANDING_TABLES.
+      (DATABRICKS_TABLE_FIREWALL). Same raw landing table pattern.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_firewallproduct"
   table_bitlocker:
     description: >
-      Encrypted volume table, feeds encryptionEnabled (DATABRICKS_TABLE_BITLOCKER). Same raw
-      landing table pattern -- see _RAW_LANDING_TABLES.
+      Encrypted volume table, feeds encryptionEnabled (DATABRICKS_TABLE_BITLOCKER). Same
+      raw landing table pattern.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_encryptable_volume"
   table_computer_system:
     description: >
-      Computer system table, feeds hardware model (DATABRICKS_TABLE_COMPUTER_SYSTEM).
-      Confirmed 2026-08-14 (794,779 rows / 39,350 distinct devices / 21 ingest batches) to be
-      the same raw landing table pattern as the other five -- included in
-      _RAW_LANDING_TABLES.
+      Computer system table, feeds hardware model (DATABRICKS_TABLE_COMPUTER_SYSTEM). Same
+      raw landing table pattern.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_computer_system"
   table_screensaver:
     description: >
-      Screen lock table, feeds screenLockEnabled (DATABRICKS_TABLE_SCREENSAVER). There is no
-      table actually named for screensavers -- t_sccm_gs_desktop carries the Control
-      Panel\Desktop registry values (screen_saver_active0/secure0/timeout0) instead, per
-      SCCM Test Tables-August.xlsx's "Desktop" sheet (si_test_catalog there). Same raw
-      landing table columns (__date/__hour/__row_hash/__raw) as the other six -- included in
-      _RAW_LANDING_TABLES. si_prod_catalog existence not yet independently confirmed for
-      this specific table the way the other six were on 2026-08-14 -- confirm with a
-      DESCRIBE/SHOW TABLES against si_prod_catalog before relying on a real prod run.
+      Screen lock table, feeds screenLockEnabled (DATABRICKS_TABLE_SCREENSAVER). No table
+      is actually named for screensavers -- t_sccm_gs_desktop carries the Control
+      Panel\Desktop registry values (screen_saver_active0/secure0/timeout0) instead. Same
+      raw landing table pattern; si_prod_catalog existence not independently confirmed for
+      this specific table.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_desktop"
 
 artifacts:
@@ -172,38 +113,28 @@ artifacts:
     type: whl
     build: python -m build --wheel
     path: .
-    # IMPORTANT: bump pyproject.toml's `version` before every deploy that changes the wheel's
-    # code or dependencies. Serverless compute caches the built environment by dependency
-    # spec and will silently keep running an OLD wheel if the version string is unchanged --
-    # this caused identical library-install failures to persist across multiple substantive
-    # code changes on 2026-07-24/27 before it was diagnosed.
+    # Bump pyproject.toml's `version` before every deploy that changes the wheel's code or
+    # dependencies -- serverless compute caches the built environment by version string and
+    # will silently keep running an old wheel otherwise.
     #
-    # dynamic_version: true (which auto-bumps this) was tried and REVERTED 2026-08-04 -- it
-    # hits a confirmed, unfixed Databricks CLI bug (databricks/cli#2784, closed "not planned"):
-    # combined with a glob-style local path in environments.spec.dependencies (our ./dist/*.whl
-    # below), the CLI can deploy two wheels -- one correctly version-patched, one stale -- and
-    # silently select the stale one. That is the most likely cause of "Unable to find or
-    # download the required package" resurfacing on 2026-08-04 even though vendor/ was intact
-    # and correct. Do not re-enable dynamic_version without a documented fix to that issue.
+    # Do not enable dynamic_version -- databricks/cli#2784 (closed "not planned") can deploy
+    # a stale wheel alongside the correctly-versioned one and silently select the stale one.
 
 resources:
   jobs:
     extract_devices_job:
       name: extract_devices_job
 
-      # Quartz cron, seconds-first: "0 0 0 * * ?" = every day at midnight local to
-      # timezone_id. America/New_York (not a fixed "EST" offset) so it stays midnight local
-      # time across the EST/EDT daylight-saving transition instead of drifting an hour.
+      # Quartz cron, seconds-first: every day at midnight local to timezone_id.
+      # America/New_York (not a fixed offset) to stay midnight local across EST/EDT.
       schedule:
         quartz_cron_expression: "0 0 0 * * ?"
         timezone_id: "America/New_York"
         pause_status: "UNPAUSED"
 
-      # Non-secret config only -- table paths, warehouse IDs, and the secret SCOPE NAME
-      # (not its contents) are job parameters here because serverless python_wheel_task has
-      # no other way to reach the running process (see the RESOLVED note up top). Actual
-      # credentials (host/token/client_id/client_secret) never appear here -- those stay
-      # resolved from the secret scope by db/secrets.py at runtime, exactly as before.
+      # Table paths, warehouse IDs, and the secret scope NAME (not its contents) are job
+      # parameters -- serverless python_wheel_task has no other way to reach the process.
+      # Credentials themselves stay in the secret scope, resolved by db/secrets.py at runtime.
       parameters:
         - name: full
           default: "true"
@@ -250,32 +181,24 @@ resources:
 
       tasks:
         - task_key: extract_devices
-          # 14400 (4h) measured too short on a real --full run against ~9,925 users --
-          # timed out before completion. Databricks serverless SQL warehouse compute is slow
-          # enough that this population could take 24h+. Set generously above that.
+          # Serverless SQL warehouse compute can take 24h+ for the full population.
           timeout_seconds: 172800
-          # Safe because Drata upserts on externalId (see the duplicate-externalId quality
-          # gate in etl/extract_devices.py) -- a retried run re-pushes the same data,
-          # it does not create duplicates.
+          # Safe to retry -- Drata upserts on externalId, a retry can't create duplicates.
           max_retries: 1
-          # 2026-08-31: real distribution list provided (ITComplianceSupport@nationwide.com) --
-          # on_failure only; alert_on_last_attempt below collapses retries into one alert
-          # instead of spamming once per attempt.
           email_notifications:
             on_failure:
               - "ITComplianceSupport@nationwide.com"
           webhook_notifications: {}
           notification_settings:
+            # Collapses retries into a single alert instead of one per attempt.
             alert_on_last_attempt: true
           python_wheel_task:
             package_name: databricks-interface
             entry_point: extract-devices
             parameters:
-              # --env KEY=VALUE is consumed by _apply_cli_env_overrides() in
-              # etl/extract_devices.py before anything else reads a DATABRICKS_* var --
-              # this is the only channel into a serverless python_wheel_task's process
-              # (see the RESOLVED note up top). Order doesn't matter -- the whole argv is
-              # scanned upfront -- but these are listed first for readability.
+              # --env KEY=VALUE is read by _apply_cli_env_overrides() before argparse
+              # resolves its defaults -- the only channel into a serverless
+              # python_wheel_task's environment.
               - "--env"
               - "DATABRICKS_SECRET_SCOPE_PROD={{job.parameters.secret_scope_prod}}"
               - "--env"
@@ -326,18 +249,14 @@ resources:
             client: "1"
             dependencies:
               - ./dist/*.whl
-              # Vendored third-party dependencies (see vendor/README.md for how these were
-              # built and how to refresh them) -- avoids needing PyPI reachability from
-              # serverless compute, which is not open by default in this environment.
+              # Vendored wheels (see vendor/README.md) -- avoids needing PyPI reachability
+              # from serverless compute.
               - ./vendor/*.whl
 
     smoke_test_job:
       name: smoke_test_job
-      # Zero-dependency platform-isolation test (added 2026-08-04): if this fails with the
-      # same "Failed to restart Python" / dbruntime kernel-restart error extract_devices_job
-      # has been hitting, that proves the failure is workspace/platform-side, not caused by
-      # anything in our own wheel/vendor/dependency tree. No custom package, no vendored
-      # wheels, no relationship to this project's code at all -- see smoke_test.py.
+      # Zero-dependency platform-isolation test -- isolates workspace/platform failures
+      # from this project's own code (see smoke_test.py).
       tasks:
         - task_key: smoke_test
           spark_python_task:
@@ -358,49 +277,20 @@ targets:
     variables:
       secret_scope_name_prod: "dbx_irg_prod_comp_sp"
       secret_scope_name_test: "dbx_irg_dev_comp_sp"
-      # 2026-08: moving devices to the real prod inventory (si_prod_catalog) now that the
-      # test-only path is validated. devices_client/devices_table dropped -- both fall back
-      # to their top-level defaults ("prod" / si_prod_catalog...t_sccm_r_system).
-      # secret_scope_name_prod above is STILL a placeholder -- this will fail at
-      # get_client_for_env("prod") exactly like the very first real deploy did, until it's
-      # set to the real prod secret scope name. Users/secondary tables stay on
-      # si_test_catalog -- see databricks.yml's top-level variable comments, that's the
-      # permanent design, not a test-phase placeholder.
 
   prod:
     mode: production
     workspace:
-      # Confirmed 2026-08-14 directly from the browser URL of the prod workspace notebook
-      # used for the si_prod_catalog diagnostics this same day.
       host: "https://nationwide-irm-prod-ohio.cloud.databricks.com"
-      # Root path fix (2026-08-17): with no root_path set, the CLI defaulted to the
-      # deploying user's own personal path (/Workspace/Users/hardat1@nationwide.com/...),
-      # which the run_as service principal has no read access to -- job failed with
-      # "Library installation failed... file does not exist or the user does not have
-      # permission to read the library file" trying to install its own wheel from there.
-      # Databricks' own run_as documentation's worked example for this exact scenario
-      # (production target + service-principal run_as) uses a /Shared path instead, which
-      # both the deploying human and the run_as SP can read -- not a path under either
-      # identity's personal /Workspace/Users/ folder.
+      # Must be under /Shared, not a personal /Workspace/Users/ path -- the run_as service
+      # principal has no read access there.
       root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
     run_as:
-      # Application ID of dbx_irg_prod_comp_sp, confirmed 2026-08-14. Whoever runs
-      # `databricks bundle deploy -t prod` still needs CAN_USE granted on this exact SP --
-      # a separate permission from anything above, and from the SP's own workspace
+      # Requires CAN_USE granted on this service principal, separate from its workspace
       # assignment (see README's "Adding the job's service principal" section).
       service_principal_name: "8d56d7cd-cbfc-4b91-ad9c-03c7d0973774"
     variables:
-      # secret_scope_default's top-level default ("dbx_irg_dev_comp_sp") is correct for the
-      # dev target (runs against the test workspace, where that scope lives) but wrong here --
-      # this target runs in the prod workspace, which doesn't have a dbx_irg_dev_comp_sp scope
-      # for the prod SP to read. Found 2026-08-18 by Terry Hardaway via a real prod run
-      # PERMISSION_DENIED on secrets.get. NOTE: this only repoints which scope is read --
-      # confirm drata-api-key/drata-connection-id actually exist in dbx_irg_prod_comp_sp
-      # (dbutils.secrets.list(scope="dbx_irg_prod_comp_sp")) before assuming this alone fixes
-      # the run; if those two keys were never copied to the prod scope, expect the next error
-      # to be a secret-not-found instead.
+      # Prod workspace has no dbx_irg_dev_comp_sp scope -- repoint to the prod scope.
       secret_scope_default: "dbx_irg_prod_comp_sp"
-      # 2026-08-31: real prod push, deliberate -- see the top-level "sandbox" variable
-      # comment above. The nightly schedule below relies on this default; it cannot pass
-      # --params per run.
+      # Real push -- the nightly schedule relies on this default, it can't pass --params.
       sandbox: "false"
