@@ -173,3 +173,75 @@ def test_resolve_personnel_id_falls_back_to_xlsx_fields_without_mail():
 def test_resolve_personnel_id_none_when_no_valid_email_anywhere():
     assert transform._resolve_personnel_id({}) is None
     assert transform._resolve_personnel_id({'mail': 'not-an-email'}) is None
+
+
+def test_ci_get_matches_exact_case():
+    assert transform._ci_get({'auoptions0': '4'}, 'auoptions0') == '4'
+
+
+def test_ci_get_matches_different_case():
+    assert transform._ci_get({'AUOptions0': '4'}, 'auoptions0') == '4'
+
+
+def test_ci_get_missing_key_returns_none():
+    assert transform._ci_get({'SomeOtherColumn': '4'}, 'auoptions0') is None
+
+
+def test_auto_update_matches_auoptions0_regardless_of_case():
+    enabled, explanation = transform._auto_update({'AUOptions0': '4'})
+    assert enabled is True
+    assert explanation == 'Auto download and install'
+
+
+def test_auto_update_lowercase_key_still_works():
+    enabled, explanation = transform._auto_update({'auoptions0': '4'})
+    assert enabled is True
+
+
+def test_auto_update_missing_key_is_unknown_not_silently_disabled():
+    enabled, explanation = transform._auto_update({})
+    assert enabled is False
+    assert explanation == 'Unknown'
+
+
+def test_auto_update_notify_before_install_counts_as_compliant():
+    """'3' still guarantees updates download automatically -- it only avoids an unattended
+    install interrupting someone's active work, so it must pass alongside '4'."""
+    enabled, explanation = transform._auto_update({'auoptions0': '3'})
+    assert enabled is True
+    assert explanation == 'Auto download, notify before install'
+
+
+def test_auto_update_notify_before_download_is_not_compliant():
+    enabled, _ = transform._auto_update({'auoptions0': '2'})
+    assert enabled is False
+
+
+def test_auto_update_disabled_is_not_compliant():
+    enabled, _ = transform._auto_update({'auoptions0': '1'})
+    assert enabled is False
+
+
+def test_extract_screen_lock_none_when_table_absent():
+    assert transform._extract_screen_lock(None) == (None, None, None)
+
+
+def test_extract_screen_lock_enabled_converts_seconds_to_minutes():
+    row = {'screen_saver_active0': 1, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '900'}
+    enabled, explanation, wait = transform._extract_screen_lock(row)
+    assert enabled is True
+    assert wait == 15  # 900 seconds -> 15 minutes
+    assert explanation == 'ScreenLock delay is 15 minutes'
+
+
+def test_extract_screen_lock_disabled_when_not_secure():
+    row = {'screen_saver_active0': 1, 'screen_saver_secure0': '0', 'screen_saver_timeout0': '600'}
+    enabled, _, _ = transform._extract_screen_lock(row)
+    assert enabled is False
+
+
+def test_extract_screen_lock_disabled_when_not_active():
+    row = {'screen_saver_active0': 0, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '600'}
+    enabled, explanation, wait = transform._extract_screen_lock(row)
+    assert enabled is False
+    assert wait == 10

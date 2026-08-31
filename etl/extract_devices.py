@@ -134,7 +134,7 @@ _PIPELINE_CHUNK_SIZE = 500
 # device's rows multiply across every historical ingestion batch.
 _RAW_LANDING_TABLES = {
     'windows_update', 'installed_software', 'antivirus_product',
-    'firewall_product', 'bitlocker', 'computer_system',
+    'firewall_product', 'bitlocker', 'computer_system', 'screensaver',
 }
 
 
@@ -203,9 +203,10 @@ def _drata_secret_names(sandbox: bool) -> Tuple[str, str, str]:
     secret scope before a real production push is possible -- there is no fallback to the
     sandbox credentials; get_secret() raises loudly on Databricks if a key is missing, which
     is the correct failure mode here (never silently reuse sandbox credentials for a prod run).
-    host_secret is optional in both cases -- get_secret() returning empty means DrataClient
-    falls back to its own default base URL, since sandbox and prod are not known to need
-    different hosts today, only different credentials.
+    host_secret is optional in both cases -- callers must pass required=False when fetching
+    it, so a missing key falls back to None (DrataClient's own default base URL) instead of
+    raising. Sandbox and prod are not known to need different hosts today, only different
+    credentials.
     """
     if sandbox:
         return "drata-api-key", "drata-connection-id", "drata-host"
@@ -242,8 +243,12 @@ TABLE_REGISTRY = [
     # hardware model (model0), fixing the prior CPU-type-as-model bug.
     TableSpec('bitlocker',          'DATABRICKS_TABLE_BITLOCKER',           'prod', 'resource_id', False, False),
     TableSpec('computer_system',    'DATABRICKS_TABLE_COMPUTER_SYSTEM',     'prod', 'resource_id', False, False),
+    # 2026-08-26: screensaver settings found under a differently-named table (there is no
+    # dedicated "screensaver" table) -- t_sccm_gs_desktop, confirmed from SCCM Test
+    # Tables-August.xlsx's "Desktop" sheet, carries screen_saver_active0/secure0/timeout0
+    # (the Control Panel\Desktop registry values SCCM inventories under that class name).
+    TableSpec('screensaver',        'DATABRICKS_TABLE_SCREENSAVER',        'prod', 'resource_id', False, False),
     # Uncomment when Nationwide confirms table names:
-    # TableSpec('screensaver',     'DATABRICKS_TABLE_SCREENSAVER',     'prod', 'resource_id', False, False),
     # TableSpec('services',        'DATABRICKS_TABLE_SERVICES',        'prod', 'resource_id', False, False),
     # TableSpec('network_adapter', 'DATABRICKS_TABLE_NETWORK_ADAPTER', 'prod', 'resource_id', False, False),
 ]
@@ -438,7 +443,7 @@ def merge(
     device_by_netbios: Dict[str, Dict[str, Any]] = {}
     device_by_username: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for dev in devices:
-        netbios = dev.get('Netbios_Name0') or dev.get('Name0')
+        netbios = dev.get('netbios_name0') or dev.get('name0') or dev.get('Netbios_Name0') or dev.get('Name0')
         if netbios:
             # Normalized (strip+lower) so a casing/whitespace difference between the xlsx
             # users source and the SCCM devices table can't silently defeat this join.
@@ -866,7 +871,7 @@ def main() -> None:
     api_key_secret, connection_id_secret, host_secret = _drata_secret_names(args.sandbox)
     api_key = (get_secret(api_key_secret) or "").strip()
     connection_id = (get_secret(connection_id_secret) or "").strip()
-    drata_host = (get_secret(host_secret) or "").strip() or None
+    drata_host = (get_secret(host_secret, required=False) or "").strip() or None
 
     # Step 1: load users first (anchor for all downstream scope)
     if args.local_users:
@@ -1162,6 +1167,27 @@ def main() -> None:
             print(f"    {count:>6}x  display_name0={name!r:<40} product_state0={state!r:<12} decode={tag}")
         if len(ranked) > 30:
             print(f"    ... and {len(ranked) - 30} more combo(s) -- see {raw_path} for full antivirus_product data")
+
+    # 2026-08-26: auoptions0 (autoUpdateEnabled's source column, t_sccm_gs_windowsupdate)
+    # was never confirmed against a real DESCRIBE -- prod run same day showed the check
+    # failing for effectively everyone. _ci_get() in db/transform.py now matches the key
+    # case-insensitively, but if the real column is named something else entirely this
+    # still won't resolve it -- print the actual explanation distribution and raw column
+    # names seen so a wrong guess is visible immediately instead of needing another round trip.
+    if all_drata:
+        au_explanation_counts: Dict[Optional[str], int] = {}
+        for rec in all_drata:
+            key = rec.get('autoUpdateExplanation')
+            au_explanation_counts[key] = au_explanation_counts.get(key, 0) + 1
+        wu_key_samples: set = set()
+        for rec in all_merged:
+            wu = rec.get('windows_update')
+            if wu:
+                wu_key_samples.update(wu.keys())
+        print(f"\n[DIAGNOSTIC] autoUpdateEnabled explanation distribution across {len(all_drata)} record(s):")
+        for explanation, count in sorted(au_explanation_counts.items(), key=lambda kv: -kv[1]):
+            print(f"    {count:>6}x  {explanation!r}")
+        print(f"  windows_update raw column(s) seen this run: {sorted(wu_key_samples)}")
 
     # Step 6: write output files
     write_json(all_merged, raw_path)

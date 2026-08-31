@@ -83,6 +83,23 @@ def test_get_secret_databricks_path():
         MockWC.return_value.dbutils.secrets.get.assert_called_once_with(scope="my-scope", key="drata-api-key")
 
 
+def test_get_secret_databricks_path_missing_key_raises_by_default():
+    os.environ["DATABRICKS_RUNTIME_VERSION"] = "14.3.x-scala2.12"
+    os.environ["DATABRICKS_SECRET_SCOPE"] = "my-scope"
+    with mock.patch("databricks.sdk.WorkspaceClient") as MockWC:
+        MockWC.return_value.dbutils.secrets.get.side_effect = Exception("Secret does not exist")
+        with pytest.raises(Exception):
+            secrets.get_secret("drata-host-prod")
+
+
+def test_get_secret_databricks_path_missing_key_required_false_returns_none():
+    os.environ["DATABRICKS_RUNTIME_VERSION"] = "14.3.x-scala2.12"
+    os.environ["DATABRICKS_SECRET_SCOPE"] = "my-scope"
+    with mock.patch("databricks.sdk.WorkspaceClient") as MockWC:
+        MockWC.return_value.dbutils.secrets.get.side_effect = Exception("Secret does not exist")
+        assert secrets.get_secret("drata-host-prod", required=False) is None
+
+
 def test_get_client_for_env_resolves_per_workspace():
     os.environ.pop("DATABRICKS_RUNTIME_VERSION", None)
     os.environ.update({

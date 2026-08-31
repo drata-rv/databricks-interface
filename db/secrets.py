@@ -22,7 +22,7 @@ def is_databricks_runtime() -> bool:
     return bool(os.environ.get("DATABRICKS_RUNTIME_VERSION"))
 
 
-def get_secret(name: str, *, scope: Optional[str] = None, env_var: Optional[str] = None) -> Optional[str]:
+def get_secret(name: str, *, scope: Optional[str] = None, env_var: Optional[str] = None, required: bool = True) -> Optional[str]:
     """Resolve a credential by logical name.
 
     Inside Databricks: reads from a secret scope via dbutils.secrets.get(). A missing
@@ -34,6 +34,9 @@ def get_secret(name: str, *, scope: Optional[str] = None, env_var: Optional[str]
     name: logical secret name, e.g. "drata-api-key".
     scope: secret scope name; defaults to DATABRICKS_SECRET_SCOPE if not passed.
     env_var: the .env/os.getenv() key to use locally; defaults to name.upper() with '-' -> '_'.
+    required: when False, a missing key on Databricks returns None instead of raising --
+        for a genuinely optional secret that may not exist in every scope. Never set this
+        for a credential the pipeline can't run without; the loud-raise default is deliberate.
     """
     if env_var is None:
         env_var = name.upper().replace('-', '_')
@@ -42,6 +45,11 @@ def get_secret(name: str, *, scope: Optional[str] = None, env_var: Optional[str]
         from databricks.sdk import WorkspaceClient
         resolved_scope = scope or os.getenv("DATABRICKS_SECRET_SCOPE")
         client = WorkspaceClient()
-        return client.dbutils.secrets.get(scope=resolved_scope, key=name)
+        if required:
+            return client.dbutils.secrets.get(scope=resolved_scope, key=name)
+        try:
+            return client.dbutils.secrets.get(scope=resolved_scope, key=name)
+        except Exception:
+            return None
 
     return os.getenv(env_var)

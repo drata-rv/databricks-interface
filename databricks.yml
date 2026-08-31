@@ -78,10 +78,12 @@ variables:
       @sandbox.nationwide.com before pushing (see etl/extract_devices.py). Defaults "true"
       here so a parameterless "Run now" on dev can't accidentally push real personnelIds --
       full defaults true too (entire population, no --limit), so without this a bare run
-      would push real, non-sandboxed data for every user. Set to "false" deliberately (as a
-      job parameter override, not by changing this default) when actually ready for a real
-      push. prod's own target below does not override this -- confirm real intent explicitly
-      per run there instead of relying on any default.
+      would push real, non-sandboxed data for every user. 2026-08-31: prod's target below
+      NOW overrides this to "false" -- deliberate, so the nightly schedule (which triggers
+      with default parameters, unable to pass --params per run) pushes real production data
+      automatically. A manual `bundle run -t prod` with no --params override now also
+      defaults to a real push -- pass --params sandbox=true explicitly for a sandboxed test
+      run against the prod workspace instead.
     default: "true"
   # 2026-08-14: switched from si_test_catalog to si_prod_catalog -- confirmed via SHOW
   # TABLES that every table below exists under the identical name in si_prod_catalog.
@@ -153,6 +155,17 @@ variables:
       the same raw landing table pattern as the other five -- included in
       _RAW_LANDING_TABLES.
     default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_computer_system"
+  table_screensaver:
+    description: >
+      Screen lock table, feeds screenLockEnabled (DATABRICKS_TABLE_SCREENSAVER). There is no
+      table actually named for screensavers -- t_sccm_gs_desktop carries the Control
+      Panel\Desktop registry values (screen_saver_active0/secure0/timeout0) instead, per
+      SCCM Test Tables-August.xlsx's "Desktop" sheet (si_test_catalog there). Same raw
+      landing table columns (__date/__hour/__row_hash/__raw) as the other six -- included in
+      _RAW_LANDING_TABLES. si_prod_catalog existence not yet independently confirmed for
+      this specific table the way the other six were on 2026-08-14 -- confirm with a
+      DESCRIBE/SHOW TABLES against si_prod_catalog before relying on a real prod run.
+    default: "si_prod_catalog.nw_harmonized_sensitive.t_sccm_gs_desktop"
 
 artifacts:
   databricks_interface:
@@ -177,6 +190,14 @@ resources:
   jobs:
     extract_devices_job:
       name: extract_devices_job
+
+      # Quartz cron, seconds-first: "0 0 0 * * ?" = every day at midnight local to
+      # timezone_id. America/New_York (not a fixed "EST" offset) so it stays midnight local
+      # time across the EST/EDT daylight-saving transition instead of drifting an hour.
+      schedule:
+        quartz_cron_expression: "0 0 0 * * ?"
+        timezone_id: "America/New_York"
+        pause_status: "UNPAUSED"
 
       # Non-secret config only -- table paths, warehouse IDs, and the secret SCOPE NAME
       # (not its contents) are job parameters here because serverless python_wheel_task has
@@ -224,6 +245,8 @@ resources:
           default: "${var.table_bitlocker}"
         - name: table_computer_system
           default: "${var.table_computer_system}"
+        - name: table_screensaver
+          default: "${var.table_screensaver}"
 
       tasks:
         - task_key: extract_devices
@@ -282,6 +305,8 @@ resources:
               - "DATABRICKS_TABLE_BITLOCKER={{job.parameters.table_bitlocker}}"
               - "--env"
               - "DATABRICKS_TABLE_COMPUTER_SYSTEM={{job.parameters.table_computer_system}}"
+              - "--env"
+              - "DATABRICKS_TABLE_SCREENSAVER={{job.parameters.table_screensaver}}"
               - "--limit"
               - "{{job.parameters.limit}}"
               - "--full"
@@ -374,3 +399,7 @@ targets:
       # the run; if those two keys were never copied to the prod scope, expect the next error
       # to be a secret-not-found instead.
       secret_scope_default: "dbx_irg_prod_comp_sp"
+      # 2026-08-31: real prod push, deliberate -- see the top-level "sandbox" variable
+      # comment above. The nightly schedule below relies on this default; it cannot pass
+      # --params per run.
+      sandbox: "false"

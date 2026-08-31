@@ -17,9 +17,14 @@ Fields populated from current data sources:
 Fields populated from the user identity table (joined on Netbios_Name0):
   personnelId          -- User_Princiipal_Name0 (source column has the double-i typo)
 
+Fields populated from t_sccm_gs_desktop (2026-08-26 -- there is no dedicated screensaver
+table; screen lock lives in the Control Panel\\Desktop registry values SCCM inventories
+under this class name):
+  screenLockEnabled, screenLockExplanation, screenLockTime -- screen_saver_active0/
+    screen_saver_secure0/screen_saver_timeout0 (latter is in seconds, converted to minutes)
+
 Fields set to null -- require additional SCCM tables (uncomment in TABLE_REGISTRY to enable):
   firewallEnabled      -- needs t_sccm_gs_services (mpssvc / Windows Firewall service)
-  screenLockEnabled    -- needs t_sccm_gs_screensaversettings (IsEnabled, IsSecure, WaitInterval)
   windowsServices      -- needs t_sccm_gs_services
   macAddress           -- needs t_sccm_gs_networkadapterconfiguration
   browserExtensions    -- not captured by SCCM
@@ -173,12 +178,32 @@ def _is_true(value: Any) -> bool:
     return str(value).strip().lower() in ('true', '1', 't', 'yes')
 
 
+def _ci_get(d: Dict[str, Any], key: str) -> Any:
+    """Case-insensitive dict lookup. SCCM landing tables are inconsistent about column
+    casing across tables (Netbios_Name0 vs IsEnabled vs auoptions0), and unlike every other
+    column this pipeline reads, t_sccm_gs_windowsupdate's auoptions0 was never confirmed
+    against a live DESCRIBE -- 2026-08-26 prod run showed 100% of devices reading as
+    autoUpdateEnabled=False, consistent with the exact-case lookup missing a differently-
+    cased real column and silently falling through to the empty-string default."""
+    if key in d:
+        return d[key]
+    lowered = key.lower()
+    for k, v in d.items():
+        if k.lower() == lowered:
+            return v
+    return None
+
+
 def _auto_update(wu: Dict[str, Any], device: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
     if device:
         if _is_true(device.get('disable_windows_update_access')) or _is_true(device.get('do_not_connect_to_wu_locations')):
             return False, 'Windows Update disabled by policy'
-    option = str(wu.get('auoptions0') or '').strip()
-    enabled = option == '4'
+    option = str(_ci_get(wu, 'auoptions0') or '').strip()
+    # '3' (auto download, notify before install) counts as compliant alongside '4' (fully
+    # automatic) -- both guarantee updates download and are ready; '3' just avoids an
+    # unattended install interrupting someone's active work. Only '1'/'2' (no auto-download
+    # at all) are non-compliant.
+    enabled = option in ('3', '4')
     explanation = AU_OPTIONS.get(option, 'Unknown')
     return enabled, explanation
 
@@ -280,17 +305,23 @@ def _extract_model(
 def _extract_screen_lock(
     screensaver: Optional[Dict[str, Any]],
 ) -> Tuple[Optional[bool], Optional[str], Optional[int]]:
-    """Derive screenLockEnabled from a screensaver settings row. Returns (None, None, None) if absent."""
+    """Derive screenLockEnabled from a t_sccm_gs_desktop row (Control Panel\\Desktop
+    registry values -- there is no separate dedicated screensaver table). Returns
+    (None, None, None) if absent.
+
+    screen_saver_timeout0 is ScreenSaveTimeOut, which Windows stores in SECONDS -- converted
+    to minutes here since that's the unit this function has always reported in.
+    """
     if not screensaver:
         return None, None, None
-    is_enabled = screensaver.get('IsEnabled')
-    is_secure = screensaver.get('IsSecure')  # requires password on screensaver dismiss
-    wait_raw = screensaver.get('WaitInterval')
+    is_active = screensaver.get('screen_saver_active0')
+    is_secure = screensaver.get('screen_saver_secure0')  # requires password on dismiss
+    timeout_seconds_raw = screensaver.get('screen_saver_timeout0')
     try:
-        wait = int(wait_raw) if wait_raw is not None else None
+        wait = int(timeout_seconds_raw) // 60 if timeout_seconds_raw is not None else None
     except (ValueError, TypeError):
         wait = None
-    enabled = _is_true(is_enabled) and _is_true(is_secure)
+    enabled = _is_true(is_active) and _is_true(is_secure)
     if wait is not None:
         explanation = f"ScreenLock delay is {wait} minutes"
     elif enabled:

@@ -13,6 +13,7 @@ from etl.extract_devices import (
     _sccm_employee_bridge_statement,
     _drata_secret_names,
     pull_table,
+    merge,
 )
 
 
@@ -148,3 +149,22 @@ def test_drata_secret_names_prod_uses_new_distinct_names_with_no_sandbox_overlap
     sandbox_names = _drata_secret_names(True)
     assert prod_names == ("drata-api-key-prod", "drata-connection-id-prod", "drata-host-prod")
     assert set(prod_names).isdisjoint(set(sandbox_names))
+
+
+def test_merge_netbios_join_matches_lowercase_device_column():
+    """t_sccm_r_system's real column is netbios_name0 (lowercase, confirmed against SCCM Test
+    Tables-August.xlsx) -- the --local-users xlsx path's Netbios_Name0-keyed users must still
+    join against a live Databricks device row that only carries the lowercase key."""
+    devices = [{'resource_id': 1, 'netbios_name0': 'NW123ABC'}]
+    users = [{'Netbios_Name0': 'nw123abc'}]
+    records, dropped = merge(devices, [], [], users)
+    assert len(records) == 1
+    assert records[0]['device']['netbios_name0'] == 'NW123ABC'
+    assert dropped == 0
+
+
+def test_merge_netbios_join_still_matches_pascalcase_device_column():
+    devices = [{'resource_id': 1, 'Netbios_Name0': 'NW123ABC'}]
+    users = [{'Netbios_Name0': 'nw123abc'}]
+    records, dropped = merge(devices, [], [], users)
+    assert len(records) == 1
