@@ -194,10 +194,19 @@ def _ci_get(d: Dict[str, Any], key: str) -> Any:
     return None
 
 
-def _auto_update(wu: Dict[str, Any], device: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
-    if device:
-        if _is_true(device.get('disable_windows_update_access')) or _is_true(device.get('do_not_connect_to_wu_locations')):
-            return False, 'Windows Update disabled by policy'
+def _auto_update(wu: Dict[str, Any]) -> Tuple[bool, str]:
+    """usewuserver0 (UseWUServer) means the device pulls updates from Nationwide's internal
+    WSUS/SCCM update server -- centrally managed patching, compliant regardless of the local
+    AUOptions value (which a centrally-managed device often leaves unset). noautoupdate0
+    (NoAutoUpdate) overrides that -- it disables automatic updates outright even under WSUS.
+    disable_windows_update_access/do_not_connect_to_wu_locations only block the end user's
+    own Windows Update UI access -- not a signal about whether updates are actually applied,
+    so they don't factor into compliance here.
+    """
+    use_wu_server = _is_true(_ci_get(wu, 'usewuserver0'))
+    no_auto_update = _is_true(_ci_get(wu, 'noautoupdate0'))
+    if use_wu_server and not no_auto_update:
+        return True, 'Managed by internal WSUS/SCCM update server'
     option = str(_ci_get(wu, 'auoptions0') or '').strip()
     # '3' (auto download, notify before install) counts as compliant alongside '4' (fully
     # automatic) -- both guarantee updates download and are ready; '3' just avoids an
@@ -406,7 +415,7 @@ def extract_features(merged: Dict[str, Any]) -> Dict[str, Any]:
         av_enabled = True
         av_apps = av_apps + [n for n in sc_names if n not in av_apps]
     pm_enabled, pm_apps = _detect_apps(software, PASSWORD_MANAGER_SIGNATURES)
-    au_enabled, au_explanation = _auto_update(wu, device)
+    au_enabled, au_explanation = _auto_update(wu)
     fw_enabled, fw_explanation = _extract_firewall(merged.get('services'))
     enc_enabled, enc_explanation = _extract_encryption(merged.get('bitlocker'))
     sl_enabled, sl_explanation, sl_time = _extract_screen_lock(merged.get('screensaver'))

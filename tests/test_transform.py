@@ -222,6 +222,25 @@ def test_auto_update_disabled_is_not_compliant():
     assert enabled is False
 
 
+def test_auto_update_wsus_managed_is_compliant_even_with_no_local_au_policy():
+    """Real case (2026-09-08): HARDAT1/SHARAA3 both show usewuserver0=1, auoptions0=NULL --
+    centrally managed via WSUS/SCCM, no local AUOptions policy set. Must pass."""
+    enabled, explanation = transform._auto_update({'usewuserver0': 1, 'auoptions0': None})
+    assert enabled is True
+    assert explanation == 'Managed by internal WSUS/SCCM update server'
+
+
+def test_auto_update_wsus_managed_overridden_by_noautoupdate():
+    enabled, explanation = transform._auto_update({'usewuserver0': 1, 'noautoupdate0': '1', 'auoptions0': None})
+    assert enabled is False
+
+
+def test_auto_update_not_wsus_managed_falls_back_to_auoptions0():
+    enabled, explanation = transform._auto_update({'usewuserver0': 0, 'auoptions0': '4'})
+    assert enabled is True
+    assert explanation == 'Auto download and install'
+
+
 def test_extract_screen_lock_none_when_table_absent():
     assert transform._extract_screen_lock(None) == (None, None, None)
 
