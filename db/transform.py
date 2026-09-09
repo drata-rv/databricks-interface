@@ -271,16 +271,28 @@ def _resolve_personnel_id(user: Dict[str, Any]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _extract_encryption(
-    encrypted_volume: Optional[Dict[str, Any]],
+    encrypted_volume_rows: Optional[List[Dict[str, Any]]],
 ) -> Tuple[Optional[bool], Optional[Dict[str, Any]]]:
-    """Derive encryptionEnabled from a t_sccm_gs_encryptable_volume (BitLocker) row.
+    """Derive encryptionEnabled from t_sccm_gs_encryptable_volume (BitLocker).
 
-    Returns (None, None) if the table is absent. This table has no percentage-equivalent
-    column -- protection_status0 == 1 (the MicrosoftEncryptableVolume WMI convention: 0 =
-    Unprotected, 1 = Protected, 2 = Unknown) is itself the correct signal here, not a
-    compromise for the percentage check an earlier, differently-named table would have had.
+    This table has one row per volume (C:, D:, a recovery partition, a BitLocker-To-Go USB
+    drive), not one row per device -- picks the boot (C:) volume's row; returns (None, None)
+    if that row can't be identified, rather than an arbitrary other volume's status.
+
+    protection_status0 == 1 (the MicrosoftEncryptableVolume WMI convention: 0 = Unprotected,
+    1 = Protected, 2 = Unknown) is itself the correct signal here -- this table has no
+    percentage-equivalent column.
     """
-    if not encrypted_volume:
+    if not encrypted_volume_rows:
+        return None, None
+    if len(encrypted_volume_rows) == 1:
+        encrypted_volume = encrypted_volume_rows[0]
+    else:
+        encrypted_volume = next(
+            (r for r in encrypted_volume_rows if (r.get('drive_letter0') or '').strip().upper() == 'C:'),
+            None,
+        )
+    if encrypted_volume is None:
         return None, None
     protected = str(encrypted_volume.get('protection_status0') or '').strip()
     enabled = protected == '1'
@@ -392,17 +404,18 @@ def _build_windows_services(
 
 
 def _extract_mac_address(
-    network_adapter: Optional[Dict[str, Any]],
+    network_adapter_rows: Optional[List[Dict[str, Any]]],
 ) -> Optional[str]:
-    """Return the MAC address from a network adapter config row. Returns None if table absent."""
-    if not network_adapter:
-        return None
-    return (
-        network_adapter.get('MACAddress0')
-        or network_adapter.get('MACAddress')
-        or network_adapter.get('macaddress')
-        or None
-    )
+    """Return a MAC address from network adapter config rows. A device can have more than
+    one adapter (Ethernet, WiFi, Bluetooth, virtual/VPN) -- returns the first row that
+    actually has one, not an arbitrary row. Returns None if the table is absent/empty.
+    Column names unverified against a real schema; this table is currently disabled.
+    """
+    for row in network_adapter_rows or []:
+        mac = row.get('MACAddress0') or row.get('MACAddress') or row.get('macaddress')
+        if mac:
+            return mac
+    return None
 
 
 # ---------------------------------------------------------------------------

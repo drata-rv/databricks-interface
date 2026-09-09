@@ -468,13 +468,17 @@ def merge(
             sw_index.setdefault(rid, []).append(entry)
 
     # Optional tables -- build index only when table was pulled
-    bitlocker_index: Optional[Dict[int, Dict[str, Any]]] = None
+    # List-valued -- t_sccm_gs_encryptable_volume has one row per volume (C:, D:, a recovery
+    # partition, a BitLocker-To-Go USB drive), not one row per device. db/transform.py's
+    # _extract_encryption() picks the boot (C:) volume out of this list.
+    bitlocker_index: Optional[Dict[int, List[Dict[str, Any]]]] = None
     if bitlocker is not None:
         bitlocker_index = {}
         for row in bitlocker:
             rid = get_resource_id(row)
             if rid is not None:
-                bitlocker_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                bitlocker_index.setdefault(rid, []).append(entry)
 
     # List-valued, like installed_software/services -- t_sccm_gs_desktop has one row per
     # local Windows profile on a device (SYSTEM, service accounts, and the real user each
@@ -498,13 +502,16 @@ def merge(
                 entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
                 services_index.setdefault(rid, []).append(entry)
 
-    network_adapter_index: Optional[Dict[int, Dict[str, Any]]] = None
+    # List-valued -- a device has more than one network adapter (Ethernet, WiFi, Bluetooth,
+    # virtual/VPN adapters), not one row per device. Currently disabled in TABLE_REGISTRY.
+    network_adapter_index: Optional[Dict[int, List[Dict[str, Any]]]] = None
     if network_adapter is not None:
         network_adapter_index = {}
         for row in network_adapter:
             rid = get_resource_id(row)
             if rid is not None:
-                network_adapter_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                network_adapter_index.setdefault(rid, []).append(entry)
 
     # antivirus_product / firewall_product: list-indexed like installed_software -- a device
     # can have more than one registered product row (e.g. a stale Defender entry alongside
@@ -568,10 +575,10 @@ def merge(
                 "windows_update": wu_index.get(rid, {}),
                 "installed_software": sw_index.get(rid, []),
                 "user": user_fields,
-                "bitlocker": bitlocker_index.get(rid) if bitlocker_index is not None else None,
+                "bitlocker": bitlocker_index.get(rid, []) if bitlocker_index is not None else None,
                 "screensaver": screensaver_index.get(rid, []) if screensaver_index is not None else None,
                 "services": services_index.get(rid, []) if services_index is not None else None,
-                "network_adapter": network_adapter_index.get(rid) if network_adapter_index is not None else None,
+                "network_adapter": network_adapter_index.get(rid, []) if network_adapter_index is not None else None,
                 "antivirus_product": antivirus_index.get(rid, []) if antivirus_index is not None else None,
                 "firewall_product": firewall_index.get(rid, []) if firewall_index is not None else None,
                 "computer_system": computer_system_index.get(rid) if computer_system_index is not None else None,

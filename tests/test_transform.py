@@ -11,9 +11,9 @@ def test_extract_encryption_none_when_table_absent():
 
 
 def test_extract_encryption_protected():
-    enabled, explanation = transform._extract_encryption({
-        'protection_status0': '1', 'drive_letter0': 'C:',
-    })
+    enabled, explanation = transform._extract_encryption([
+        {'protection_status0': '1', 'drive_letter0': 'C:'},
+    ])
     assert enabled is True
     assert explanation['bootPartitionEncryptionDetails']['partitionFileVault2State'] == 'ENCRYPTED'
     assert explanation['bootPartitionEncryptionDetails']['partitionFileVault2Percent'] == 100
@@ -21,7 +21,7 @@ def test_extract_encryption_protected():
 
 
 def test_extract_encryption_unprotected():
-    enabled, explanation = transform._extract_encryption({'protection_status0': '0'})
+    enabled, explanation = transform._extract_encryption([{'protection_status0': '0'}])
     assert enabled is False
     assert explanation['bootPartitionEncryptionDetails']['partitionFileVault2State'] == 'DECRYPTED'
     assert explanation['bootPartitionEncryptionDetails']['partitionFileVault2Percent'] is None
@@ -29,8 +29,28 @@ def test_extract_encryption_unprotected():
 
 def test_extract_encryption_unknown_status_is_not_enabled():
     """protection_status0 == 2 (WMI 'Unknown') must not be treated as protected."""
-    enabled, _ = transform._extract_encryption({'protection_status0': '2'})
+    enabled, _ = transform._extract_encryption([{'protection_status0': '2'}])
     assert enabled is False
+
+
+def test_extract_encryption_picks_boot_volume_among_multiple():
+    """t_sccm_gs_encryptable_volume has one row per volume -- a device with an unprotected
+    D: drive alongside an encrypted C: must report on C:, not an arbitrary volume."""
+    rows = [
+        {'protection_status0': '0', 'drive_letter0': 'D:'},
+        {'protection_status0': '1', 'drive_letter0': 'C:'},
+    ]
+    enabled, explanation = transform._extract_encryption(rows)
+    assert enabled is True
+    assert explanation['bootPartitionEncryptionDetails']['partitionName'] == 'C:'
+
+
+def test_extract_encryption_none_when_no_boot_volume_among_multiple():
+    rows = [
+        {'protection_status0': '1', 'drive_letter0': 'D:'},
+        {'protection_status0': '0', 'drive_letter0': 'E:'},
+    ]
+    assert transform._extract_encryption(rows) == (None, None)
 
 
 def test_extract_model_prefers_computer_system():
@@ -295,3 +315,15 @@ def test_extract_screen_lock_none_when_users_own_row_not_present():
 def test_extract_screen_lock_none_when_no_device_context():
     rows = [{'name0': 'NWIE\\sharaa3', 'screen_saver_active0': 1, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '300'}]
     assert transform._extract_screen_lock(rows, None) == (None, None, None)
+
+
+def test_extract_mac_address_none_when_table_absent():
+    assert transform._extract_mac_address(None) is None
+    assert transform._extract_mac_address([]) is None
+
+
+def test_extract_mac_address_skips_adapter_without_one():
+    """A device has more than one adapter -- must not stop at the first row if it has no
+    MAC address (a disconnected/virtual adapter), skip to one that actually does."""
+    rows = [{'MACAddress0': None}, {'MACAddress0': 'AA:BB:CC:DD:EE:FF'}]
+    assert transform._extract_mac_address(rows) == 'AA:BB:CC:DD:EE:FF'
