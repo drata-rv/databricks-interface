@@ -476,13 +476,18 @@ def merge(
             if rid is not None:
                 bitlocker_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
 
-    screensaver_index: Optional[Dict[int, Dict[str, Any]]] = None
+    # List-valued, like installed_software/services -- t_sccm_gs_desktop has one row per
+    # local Windows profile on a device (SYSTEM, service accounts, and the real user each
+    # get their own row); db/transform.py's _extract_screen_lock() picks the one matching
+    # the device's own user_name0/user_domain0 out of this list.
+    screensaver_index: Optional[Dict[int, List[Dict[str, Any]]]] = None
     if screensaver is not None:
         screensaver_index = {}
         for row in screensaver:
             rid = get_resource_id(row)
             if rid is not None:
-                screensaver_index[rid] = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                entry = {k: v for k, v in row.items() if k not in ("resource_id", "ResourceID")}
+                screensaver_index.setdefault(rid, []).append(entry)
 
     services_index: Optional[Dict[int, List[Dict[str, Any]]]] = None
     if services is not None:
@@ -564,7 +569,7 @@ def merge(
                 "installed_software": sw_index.get(rid, []),
                 "user": user_fields,
                 "bitlocker": bitlocker_index.get(rid) if bitlocker_index is not None else None,
-                "screensaver": screensaver_index.get(rid) if screensaver_index is not None else None,
+                "screensaver": screensaver_index.get(rid, []) if screensaver_index is not None else None,
                 "services": services_index.get(rid, []) if services_index is not None else None,
                 "network_adapter": network_adapter_index.get(rid) if network_adapter_index is not None else None,
                 "antivirus_product": antivirus_index.get(rid, []) if antivirus_index is not None else None,

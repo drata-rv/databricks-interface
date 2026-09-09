@@ -312,16 +312,35 @@ def _extract_model(
 
 
 def _extract_screen_lock(
-    screensaver: Optional[Dict[str, Any]],
+    screensaver_rows: Optional[List[Dict[str, Any]]],
+    device: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[bool], Optional[str], Optional[int]]:
     """Derive screenLockEnabled from a t_sccm_gs_desktop row (Control Panel\\Desktop
-    registry values -- there is no separate dedicated screensaver table). Returns
-    (None, None, None) if absent.
+    registry values -- there is no separate dedicated screensaver table).
+
+    t_sccm_gs_desktop has one row per local Windows profile on a device (SYSTEM, NETWORK
+    SERVICE, service accounts, and the actual logged-in user all get their own row) --
+    name0 holds "DOMAIN\\username" for each. Picks the row matching the device's own
+    user_domain0\\user_name0; returns (None, None, None) if that row can't be identified,
+    rather than falling back to an arbitrary (likely service-account) row.
 
     screen_saver_timeout0 is ScreenSaveTimeOut, which Windows stores in SECONDS -- converted
     to minutes here since that's the unit this function has always reported in.
     """
-    if not screensaver:
+    if not screensaver_rows:
+        return None, None, None
+    screensaver = None
+    if device:
+        uname = (device.get('user_name0') or '').strip().lower()
+        udomain = (device.get('user_domain0') or '').strip().lower()
+        expected = f"{udomain}\\{uname}" if uname else None
+        if expected:
+            for row in screensaver_rows:
+                name = (row.get('name0') or '').strip().lower()
+                if name == expected:
+                    screensaver = row
+                    break
+    if screensaver is None:
         return None, None, None
     is_active = screensaver.get('screen_saver_active0')
     is_secure = screensaver.get('screen_saver_secure0')  # requires password on dismiss
@@ -418,7 +437,7 @@ def extract_features(merged: Dict[str, Any]) -> Dict[str, Any]:
     au_enabled, au_explanation = _auto_update(wu)
     fw_enabled, fw_explanation = _extract_firewall(merged.get('services'))
     enc_enabled, enc_explanation = _extract_encryption(merged.get('bitlocker'))
-    sl_enabled, sl_explanation, sl_time = _extract_screen_lock(merged.get('screensaver'))
+    sl_enabled, sl_explanation, sl_time = _extract_screen_lock(merged.get('screensaver'), device)
     model = _extract_model(device, merged.get('computer_system'))
 
     return {

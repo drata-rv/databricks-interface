@@ -241,26 +241,57 @@ def test_auto_update_not_wsus_managed_falls_back_to_auoptions0():
     assert explanation == 'Auto download and install'
 
 
+_DEVICE = {'user_name0': 'sharaa3', 'user_domain0': 'NWIE'}
+
+
 def test_extract_screen_lock_none_when_table_absent():
-    assert transform._extract_screen_lock(None) == (None, None, None)
+    assert transform._extract_screen_lock(None, _DEVICE) == (None, None, None)
 
 
 def test_extract_screen_lock_enabled_converts_seconds_to_minutes():
-    row = {'screen_saver_active0': 1, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '900'}
-    enabled, explanation, wait = transform._extract_screen_lock(row)
+    rows = [{'name0': 'NWIE\\sharaa3', 'screen_saver_active0': 1, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '900'}]
+    enabled, explanation, wait = transform._extract_screen_lock(rows, _DEVICE)
     assert enabled is True
     assert wait == 15  # 900 seconds -> 15 minutes
     assert explanation == 'ScreenLock delay is 15 minutes'
 
 
 def test_extract_screen_lock_disabled_when_not_secure():
-    row = {'screen_saver_active0': 1, 'screen_saver_secure0': '0', 'screen_saver_timeout0': '600'}
-    enabled, _, _ = transform._extract_screen_lock(row)
+    rows = [{'name0': 'NWIE\\sharaa3', 'screen_saver_active0': 1, 'screen_saver_secure0': '0', 'screen_saver_timeout0': '600'}]
+    enabled, _, _ = transform._extract_screen_lock(rows, _DEVICE)
     assert enabled is False
 
 
 def test_extract_screen_lock_disabled_when_not_active():
-    row = {'screen_saver_active0': 0, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '600'}
-    enabled, explanation, wait = transform._extract_screen_lock(row)
+    rows = [{'name0': 'NWIE\\sharaa3', 'screen_saver_active0': 0, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '600'}]
+    enabled, explanation, wait = transform._extract_screen_lock(rows, _DEVICE)
     assert enabled is False
     assert wait == 10
+
+
+def test_extract_screen_lock_picks_real_user_row_not_service_account():
+    """Real case (2026-09-09): t_sccm_gs_desktop has one row per local Windows profile --
+    service accounts, SYSTEM, and the real user each get their own row. Must not silently
+    use a service account's (arbitrary, always-inactive) settings for the real user."""
+    rows = [
+        {'name0': 'NT AUTHORITY\\SYSTEM', 'screen_saver_active0': 0, 'screen_saver_secure0': None, 'screen_saver_timeout0': None},
+        {'name0': 'NT SERVICE\\SplunkForwarder', 'screen_saver_active0': 0, 'screen_saver_secure0': None, 'screen_saver_timeout0': None},
+        {'name0': 'NWIE\\sharaa3', 'screen_saver_active0': 1, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '300'},
+    ]
+    enabled, explanation, wait = transform._extract_screen_lock(rows, _DEVICE)
+    assert enabled is True
+    assert wait == 5
+
+
+def test_extract_screen_lock_none_when_users_own_row_not_present():
+    """Only service-account rows present -- no row for the device's own user. Must return
+    undetermined (None), not a service account's arbitrary value."""
+    rows = [
+        {'name0': 'NT AUTHORITY\\SYSTEM', 'screen_saver_active0': 0, 'screen_saver_secure0': None, 'screen_saver_timeout0': None},
+    ]
+    assert transform._extract_screen_lock(rows, _DEVICE) == (None, None, None)
+
+
+def test_extract_screen_lock_none_when_no_device_context():
+    rows = [{'name0': 'NWIE\\sharaa3', 'screen_saver_active0': 1, 'screen_saver_secure0': '1', 'screen_saver_timeout0': '300'}]
+    assert transform._extract_screen_lock(rows, None) == (None, None, None)
